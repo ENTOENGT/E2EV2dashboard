@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>ENTOEN-Brands Operation</title>
+<title>ENTOEN - BRANDS OPERATION</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
 <style>
 :root{
@@ -123,6 +123,8 @@ input,select{font-family:inherit;font-size:14px}
 .topbar h1{font-size:20px}
 .topbar .crumb{color:var(--ink-soft);font-size:12.5px;font-weight:500}
 .topbar .spacer{flex:1}
+.last-updated{font-size:12px;color:var(--ink-soft);font-weight:500;white-space:nowrap;margin-right:6px}
+@media(max-width:760px){.last-updated{display:none}}
 .mobile-menu{display:none}
 .chip-filter{
   display:flex;align-items:center;gap:7px;padding:8px 12px;border:1.5px solid var(--line);
@@ -353,6 +355,11 @@ tbody tr:last-child td{border-bottom:none}
 #modalErr{margin:14px 20px 0}
 .btn-del-solid{background:var(--bad);color:#fff;border:1px solid var(--bad);padding:9px 16px;border-radius:9px;font-weight:600;cursor:pointer}
 .btn-del-solid:hover{filter:brightness(.94)}
+/* ADDED (Issue 6): upload preview */
+.upload-preview{background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin-top:6px;max-height:180px;overflow:auto}
+.upload-preview .up-title{font-size:11px;font-weight:700;color:var(--ink-soft);text-transform:uppercase;letter-spacing:.4px;margin-bottom:6px}
+.upload-preview .up-row{font-size:12.5px;color:var(--ink);font-family:ui-monospace,monospace;padding:2px 0;border-bottom:1px dashed var(--line)}
+.upload-preview .up-more{font-size:12px;color:var(--ink-soft);padding-top:6px}
 
 </style>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
@@ -430,6 +437,8 @@ tbody tr:last-child td{border-bottom:none}
         <div class="crumb" id="pageCrumb">Overview · Last 30 days</div>
       </div>
       <div class="spacer"></div>
+      <!-- ADDED (Issue 3): Last Updated Date & Time -->
+      <div class="last-updated" id="lastUpdated">Last updated: —</div>
       <div class="chip-filter">
         <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M22 3H2l8 9.46V19l4 2v-8.54L22 3z"/></svg>
         <select id="whFilter" data-onchange="applyFilters()">
@@ -528,6 +537,23 @@ function addStock(sku,wh,delta){
   if(!r){ r={sku,wh,qty:0}; STOCK.push(r); }
   r.qty += delta;
 }
+// FIXED (Issue 4): rebuild STOCK live from ledgers so deletes never leave ghost stock.
+// Stock = SUM(Inward) - SUM(Outward) ± Transfers, per SKU+Warehouse.
+// Orphan (zero) entries are dropped and negative stock is clamped to 0.
+function recomputeStock(){
+  const map={}; // key sku@wh -> qty
+  const key=(sku,wh)=>sku+'@@'+wh;
+  const bump=(sku,wh,d)=>{ if(!sku||!wh)return; const k=key(sku,wh); map[k]=(map[k]||0)+d; };
+  INWARD.forEach(r=>{ bump(r.sku, r.wh, r.qty); });               // inward adds (purchase + return)
+  OUTWARD.forEach(o=>{ bump(o.sku, o.wh, -o.qty); });            // outward subtracts
+  TRANSFERS.forEach(t=>{ bump(t.sku, t.from, -t.qty); bump(t.sku, t.to, t.qty); }); // move between warehouses
+  STOCK.length=0; // clear old (removes orphan entries)
+  Object.keys(map).forEach(k=>{
+    const q=map[k]; if(q===0) return;                             // drop zero/orphan lines
+    const [sku,wh]=k.split('@@');
+    STOCK.push({ sku, wh, qty: q<0?0:q });                        // prevent negative stock
+  });
+}
 
 /* ============================================================
    LOGIN + FIRST-LOGIN PASSWORD RESET
@@ -580,6 +606,9 @@ function enterApp(user){
   document.getElementById('userRole').textContent=isAdmin()?'Administrator':(myBrandLabel()+' · Client');
   buildWhFilter();
   buildNav();
+  // ADDED (Issue 3): render stored last-updated on entry
+  loadLastUpdated();
+  const lu=document.getElementById('lastUpdated'); if(lu) lu.textContent='Last updated: '+fmtUpdated(LAST_UPDATED);
   go('dashboard');
 }
 function logout(){
@@ -675,8 +704,31 @@ function clearFieldError(id){ const e=document.getElementById(id); if(e){ e.styl
 function isValidEmail(email){ return /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email); }
 
 /* import-error banners (per section) */
-const IMPORT_ERR = { inward:null, outward:null };
-function showImportError(section, summary, details){ IMPORT_ERR[section]={summary,details:details||[]}; if(section==='inward') RENDER.inward(); else { const b=document.getElementById('outBody'); if(b) renderSalesTab(); else RENDER.outward(); } }
+// ADDED (Issue 3): Last Updated Date & Time — stored in localStorage, format DD-MM-YYYY HH:mm
+let LAST_UPDATED = null;
+function touchUpdated(){
+  LAST_UPDATED = new Date().toISOString();
+  try{ localStorage.setItem('entoen_last_updated', LAST_UPDATED); }catch(e){}
+  const el=document.getElementById('lastUpdated');
+  if(el) el.textContent='Last updated: '+fmtUpdated(LAST_UPDATED);
+}
+function loadLastUpdated(){
+  try{ LAST_UPDATED = localStorage.getItem('entoen_last_updated'); }catch(e){ LAST_UPDATED=null; }
+}
+function fmtUpdated(iso){
+  if(!iso) return '—';
+  const d=new Date(iso); if(isNaN(d)) return '—';
+  const p=n=>String(n).padStart(2,'0');
+  return `${p(d.getDate())}-${p(d.getMonth()+1)}-${d.getFullYear()} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+const IMPORT_ERR = { inward:null, outward:null, transfer:null }; // UPDATED (Issue 5): + transfer
+function refreshImportSection(section){ // ADDED (Issue 5)
+  if(section==='inward') RENDER.inward();
+  else if(section==='transfer'){ if(typeof renderTransferTab==='function') renderTransferTab(); }
+  else { const b=document.getElementById('outBody'); if(b) renderSalesTab(); else RENDER.outward(); }
+}
+function showImportError(section, summary, details){ IMPORT_ERR[section]={summary,details:details||[]}; refreshImportSection(section); }
 function clearImportError(section){ IMPORT_ERR[section]=null; }
 function importErrorBanner(section){
   const e=IMPORT_ERR[section]; if(!e) return '';
@@ -687,7 +739,7 @@ function importErrorBanner(section){
     ${e.details.length?`<ul class="ie-list">${e.details.slice(0,12).map(d=>`<li>${esc(d)}</li>`).join('')}${e.details.length>12?`<li>…and ${e.details.length-12} more</li>`:''}</ul>`:''}
   </div>`;
 }
-function dismissImportError(section){ IMPORT_ERR[section]=null; if(section==='inward') RENDER.inward(); else RENDER.outward(); }
+function dismissImportError(section){ IMPORT_ERR[section]=null; refreshImportSection(section); }
 
 /* CSV export */
 function downloadCSV(filename, rows){
@@ -956,16 +1008,16 @@ function saveInward(){
   const val=parseInt(document.getElementById('in_value').value)||qty*(p.cost||0);
   const grn=(document.getElementById('in_grn').value||'').trim();
   INWARD.unshift({id:nextId('IN'),type,boe,po,supplier,brand,sku,qty,value:val,wh,date,grn});
-  addStock(sku,wh,qty); // both purchases and returns add stock back
+  recomputeStock(); touchUpdated(); // FIXED (Issue 4) + ADDED (Issue 3)
   toast(`${type} saved · +${qty} ${sku} to ${wh}`);
   RENDER.inward();
 }
 function deleteInward(id){
   const i=INWARD.findIndex(r=>r.id===id); if(i<0) return;
   const r=INWARD[i];
-  // reverse the stock this record added
-  addStock(r.sku, r.wh, -r.qty);
   INWARD.splice(i,1);
+  recomputeStock();        // FIXED (Issue 4): recompute instead of manual reverse — no ghost stock
+  touchUpdated();          // ADDED (Issue 3)
   toast(`Deleted inward ${esc(r.boe)} · ${esc(r.sku)}`);
   RENDER.inward();
 }
@@ -1033,21 +1085,25 @@ function handleInwardUpload(input){
     }
     if(errors.length){ showImportError('inward',`Import cancelled — ${errors.length} row(s) did not match your brands, users or warehouses. Nothing was imported.`, errors); return; }
     if(!staged.length){ showImportError('inward','No valid rows found in the file.',[]); return; }
-    // all valid → commit (auto-create any unknown SKU under its brand)
-    staged.forEach(s=>{
-      const p=ensureProduct(s.sku, s.pname, s.brand);
-      // Unit cost drives inventory value. Prefer explicit unit cost; else derive from value/qty.
-      let unitCost=parseFloat(s.costS)||0;
-      let val=parseFloat(s.valS)||0;
-      if(!unitCost && val && s.qty) unitCost=val/s.qty;
-      if(!val) val=unitCost*s.qty;
-      if(unitCost>0) p.cost=Math.round(unitCost); // update product cost so inventory shows value
-      INWARD.unshift({id:nextId('IN'),type:s.type,boe:s.boe,po:s.po,supplier:s.supplier,brand:s.brand,sku:s.sku,qty:s.qty,value:Math.round(val),wh:s.wh,date:s.date,grn:s.grn});
-      addStock(s.sku,s.wh,s.qty);
-    });
-    clearImportError('inward');
-    toast(`Imported ${staged.length} inward row(s)`);
-    RENDER.inward();
+    // UPDATED (Issue 6): validate first, then ask for confirmation before committing.
+    const commit=()=>{
+      staged.forEach(s=>{
+        const p=ensureProduct(s.sku, s.pname, s.brand);
+        // Unit cost drives inventory value. Prefer explicit unit cost; else derive from value/qty.
+        let unitCost=parseFloat(s.costS)||0;
+        let val=parseFloat(s.valS)||0;
+        if(!unitCost && val && s.qty) unitCost=val/s.qty;
+        if(!val) val=unitCost*s.qty;
+        if(unitCost>0) p.cost=Math.round(unitCost); // update product cost so inventory shows value
+        INWARD.unshift({id:nextId('IN'),type:s.type,boe:s.boe,po:s.po,supplier:s.supplier,brand:s.brand,sku:s.sku,qty:s.qty,value:Math.round(val),wh:s.wh,date:s.date,grn:s.grn});
+      });
+      recomputeStock();      // FIXED (Issue 4)
+      touchUpdated();        // ADDED (Issue 3)
+      clearImportError('inward');
+      toast(`Imported ${staged.length} inward row(s)`);
+      RENDER.inward();
+    };
+    confirmUpload('inward', staged.length, staged.slice(0,5).map(s=>`${s.type} · ${s.sku} · ${s.qty} → ${s.wh}`), commit);
   });
 }
 
@@ -1200,16 +1256,17 @@ function saveOutward(){
   const commission=Math.round(parseFloat(document.getElementById('ou_comm').value)||0);
   if(!qty){ toast('Enter a quantity'); return; }
   if(stockQty(sku,wh)<qty){ toast(`Not enough stock: ${stockQty(sku,wh)} of ${sku} in ${wh}`); return; }
-  addStock(sku,wh,-qty);
   OUTWARD.unshift({id:nextId('OU'),order,channel,sku,qty,price,commission,date:'2026-07-07',wh,brand:p.brand});
+  recomputeStock(); touchUpdated(); // FIXED (Issue 4) + ADDED (Issue 3)
   toast(`Sale logged · -${qty} ${sku} from ${wh}`);
   renderSalesTab();
 }
 function deleteOutward(id){
   const i=OUTWARD.findIndex(o=>o.id===id); if(i<0) return;
   const o=OUTWARD[i];
-  addStock(o.sku, o.wh, o.qty); // return the stock that was sold
   OUTWARD.splice(i,1);
+  recomputeStock();        // FIXED (Issue 4): recompute instead of manual reverse — no ghost stock
+  touchUpdated();          // ADDED (Issue 3)
   toast(`Deleted sale ${esc(o.order)}`);
   renderSalesTab();
 }
@@ -1249,10 +1306,16 @@ function handleOutwardUpload(input){
     }
     if(errors.length){ showImportError('outward',`Import cancelled — ${errors.length} row(s) failed validation. Nothing was imported.`, errors); return; }
     if(!staged.length){ showImportError('outward','No valid rows found in the file.',[]); return; }
-    staged.forEach(s=>{ OUTWARD.unshift({...s, id:nextId('OU')}); addStock(s.sku,s.wh,-s.qty); });
-    clearImportError('outward');
-    toast(`Imported ${staged.length} sale(s)`);
-    renderSalesTab();
+    // UPDATED (Issue 6): confirm before committing
+    const commit=()=>{
+      staged.forEach(s=>{ OUTWARD.unshift({...s, id:nextId('OU')}); });
+      recomputeStock();      // FIXED (Issue 4)
+      touchUpdated();        // ADDED (Issue 3)
+      clearImportError('outward');
+      toast(`Imported ${staged.length} sale(s)`);
+      renderSalesTab();
+    };
+    confirmUpload('outward', staged.length, staged.slice(0,5).map(s=>`${s.channel} · ${s.sku} · ${s.qty} from ${s.wh}`), commit);
   });
 }
 
@@ -1270,14 +1333,65 @@ function renderTransferTab(){
       <div class="fg-field"><label>Date</label><input id="tr_date" type="date" value="2026-07-07"></div>
       <div class="fg-field" style="justify-content:flex-end"><button class="btn btn-teal" data-onclick="saveTransfer()">Create transfer</button></div>
     </div>`:`<p style="color:var(--ink-soft);font-size:13px">You need at least two warehouses and one product to transfer stock.</p>`}
+    ${canT?`<div style="display:flex;gap:10px;margin-top:12px;flex-wrap:wrap">
+      <input type="file" id="transferFile" accept=".csv" style="display:none" data-onchange="handleTransferUpload(this)">
+      <button class="btn btn-ghost" data-onclick="document.getElementById('transferFile').click()">Bulk upload transfers (CSV)</button>
+      <button class="btn btn-ghost" data-onclick="downloadTransferTemplate()">Download transfer template</button>
+    </div>`:''}
+    ${importErrorBanner('transfer')}
   </div>
   <div class="card">
     <div class="card-head"><div><h3>Transfers</h3><div class="ch-sub">${trans.length} movements</div></div></div>
     ${trans.length?`<div class="table-scroll"><table>
-      <thead><tr><th>Transfer ID</th><th>SKU</th><th class="num">Qty</th><th class="num">Value moved</th><th>From</th><th>To</th><th>Date</th><th>Status</th></tr></thead>
-      <tbody>${trans.map(t=>`<tr><td class="sku-cell">${esc(t.id)}</td><td>${esc(t.sku)}</td><td class="num mono">${t.qty}</td><td class="num mono">${inr(t.qty*(prod(t.sku).cost||0))}</td><td>${esc(t.from)}</td><td>${esc(t.to)}</td><td class="mono">${esc(t.date)}</td><td>${t.status==='Delivered'?'<span class="pill ok">Delivered</span>':'<span class="pill over">In transit</span>'}</td></tr>`).join('')}</tbody>
+      <thead><tr><th>Transfer ID</th><th>SKU</th><th class="num">Qty</th><th class="num">Value moved</th><th>From</th><th>To</th><th>Date</th><th>Status</th>${isAdmin()?'<th></th>':''}</tr></thead>
+      <tbody>${trans.map(t=>`<tr><td class="sku-cell">${esc(t.id)}</td><td>${esc(t.sku)}</td><td class="num mono">${t.qty}</td><td class="num mono">${inr(t.qty*(prod(t.sku).cost||0))}</td><td>${esc(t.from)}</td><td>${esc(t.to)}</td><td class="mono">${esc(t.date)}</td><td>${t.status==='Delivered'?'<span class="pill ok">Delivered</span>':'<span class="pill over">In transit</span>'}</td>${isAdmin()?`<td class="num"><button class="btn btn-ghost btn-del" data-onclick="askDeleteTransfer('${esc(t.id)}')">Delete</button></td>`:''}</tr>`).join('')}</tbody>
     </table></div>`:`<p style="color:var(--ink-soft);font-size:13px;padding:8px 0">No transfers yet.</p>`}
   </div>`;
+}
+// ADDED (Issue 5): transfer CSV template
+function downloadTransferTemplate(){
+  downloadCSV('transfer_template.csv',[
+    ['SKU','Quantity','From Warehouse','To Warehouse','Date (YYYY-MM-DD)'],
+    ['SKU-001','50','Warehouse 1','Warehouse 2','2026-07-07'],
+  ]);
+}
+// ADDED (Issue 5): bulk upload for stock transfers with row validation + confirmation
+function handleTransferUpload(input){
+  readFileThen(input, rows=>{
+    if(rows.length<2){ showImportError('transfer','The file has no data rows.',[]); return; }
+    if(WAREHOUSES.length<2){ showImportError('transfer','You need at least two warehouses.',[]); return; }
+    const errors=[]; const staged=[]; const running={};
+    const stockOf=(sku,wh)=>{ const k=sku+'@'+wh; if(running[k]===undefined) running[k]=stockQty(sku,wh); return running[k]; };
+    for(let i=1;i<rows.length;i++){
+      const r=rows[i]; const ln=i+1;
+      const [sku,qtyS,from,to,date]=r.map(x=>String(x==null?'':x).trim());
+      if(r.length<4 || (!sku && !from && !to)) continue;
+      const rowErr=[];
+      if(!sku) rowErr.push('missing SKU');
+      else if(!PRODUCTS.some(p=>p.sku===sku)) rowErr.push(`SKU "${sku}" does not exist`);
+      if(!from) rowErr.push('missing From Warehouse');
+      else if(!WAREHOUSES.includes(from)) rowErr.push(`From Warehouse "${from}" does not exist`);
+      if(!to) rowErr.push('missing To Warehouse');
+      else if(!WAREHOUSES.includes(to)) rowErr.push(`To Warehouse "${to}" does not exist`);
+      if(from && to && from===to) rowErr.push('From and To warehouses must differ');
+      const qty=parseInt(qtyS)||0;
+      if(!qty) rowErr.push('quantity must be a positive number');
+      if(sku && from && WAREHOUSES.includes(from) && qty && stockOf(sku,from)<qty) rowErr.push(`only ${stockOf(sku,from)} of "${sku}" available in "${from}" (need ${qty})`);
+      if(rowErr.length){ errors.push(`Row ${ln}: ${rowErr.join('; ')}`); continue; }
+      running[sku+'@'+from]-=qty; running[sku+'@'+to]=(running[sku+'@'+to]===undefined?stockQty(sku,to):running[sku+'@'+to])+qty;
+      staged.push({sku,qty,from,to,date:date||'2026-07-07'});
+    }
+    if(errors.length){ showImportError('transfer',`Import cancelled — ${errors.length} row(s) failed validation. Nothing was imported.`, errors); return; }
+    if(!staged.length){ showImportError('transfer','No valid rows found in the file.',[]); return; }
+    const commit=()=>{
+      staged.forEach(s=>{ TRANSFERS.unshift({id:nextId('TRF'),sku:s.sku,qty:s.qty,from:s.from,to:s.to,date:s.date,status:'Delivered'}); });
+      recomputeStock(); touchUpdated();
+      clearImportError('transfer');
+      toast(`Imported ${staged.length} transfer(s)`);
+      renderTransferTab();
+    };
+    confirmUpload('transfer', staged.length, staged.slice(0,5).map(s=>`${s.sku} · ${s.qty} · ${s.from} → ${s.to}`), commit);
+  });
 }
 function saveTransfer(){
   const sku=document.getElementById('tr_sku').value;
@@ -1287,10 +1401,26 @@ function saveTransfer(){
   if(!qty){ toast('Enter a quantity'); return; }
   if(from===to){ toast('Choose different warehouses'); return; }
   if(stockQty(sku,from)<qty){ toast(`Not enough stock: ${stockQty(sku,from)} in ${from}`); return; }
-  addStock(sku,from,-qty); addStock(sku,to,qty);
-  TRANSFERS.unshift({id:'TRF-'+Math.floor(Math.random()*9000+1000),sku,qty,from,to,date,status:'Delivered'});
+  TRANSFERS.unshift({id:nextId('TRF'),sku,qty,from,to,date,status:'Delivered'});
+  recomputeStock();        // FIXED (Issue 4): stock follows the ledger
+  touchUpdated();          // ADDED (Issue 3)
   toast(`Transferred ${qty} ${sku}: ${from} → ${to}`);
   renderTransferTab();
+}
+// ADDED (Issue 5): delete a stock transfer and re-adjust stock
+function deleteTransfer(id){
+  const i=TRANSFERS.findIndex(t=>t.id===id); if(i<0) return;
+  const t=TRANSFERS[i];
+  TRANSFERS.splice(i,1);
+  recomputeStock();        // reverses the from/to movement automatically
+  touchUpdated();
+  toast(`Deleted transfer ${esc(t.id)}`);
+  renderTransferTab();
+}
+// ADDED (Issue 5): confirmation wrapper for transfer delete
+function askDeleteTransfer(id){
+  if(typeof confirmAction==='function'){ confirmAction('Are you sure you want to delete this transfer? Stock will be re-adjusted.', ()=>deleteTransfer(id)); }
+  else if(confirm('Delete this transfer? Stock will be re-adjusted.')){ deleteTransfer(id); }
 }
 
 /* ============================================================
@@ -1464,14 +1594,31 @@ RENDER.brands=function(){
       <div class="card-head"><div><h3>All brands</h3><div class="ch-sub">${BRANDS.length} brands</div></div></div>
       ${BRANDS.length?`<div class="table-scroll"><table><thead><tr><th>Brand</th><th class="num">Products</th><th></th></tr></thead>
         <tbody>${BRANDS.map(b=>`<tr><td class="sku-cell">${esc(b)}</td><td class="num mono">${PRODUCTS.filter(p=>p.brand===b).length}</td>
-        <td class="num"><button class="btn btn-ghost" style="padding:6px 10px" data-onclick="editBrand('${esc(b)}')">Edit</button>
+        <td class="num"><button class="btn btn-ghost" style="padding:6px 10px" data-onclick="manageBrandProducts('${esc(b)}')">Products</button>
+        <button class="btn btn-ghost" style="padding:6px 10px" data-onclick="editBrand('${esc(b)}')">Edit</button>
         <button class="btn btn-ghost btn-del" style="padding:6px 10px" data-onclick="askRemoveBrand('${esc(b)}')">Delete</button></td></tr>`).join('')}</tbody></table></div>`
         :`<p style="color:var(--ink-soft);font-size:13px">No brands yet. Create one to start assigning products and users.</p>`}
     </div>
   </div>`;
 };
 function addBrand(){ const n=(document.getElementById('b_name').value||'').trim(); if(!n){toast('Enter a brand name');return;} if(BRANDS.includes(n)){toast('That brand exists');return;} BRANDS.push(n); toast('Brand created · '+n); RENDER.brands(); }
-function removeBrand(b){ if(PRODUCTS.some(p=>p.brand===b)){ toast('Remove that brand’s products first'); return; } const i=BRANDS.indexOf(b); if(i>=0)BRANDS.splice(i,1); toast('Brand removed'); RENDER.brands(); }
+// UPDATED (Issue 2): cascade delete — remove the brand AND its linked products + their records
+function removeBrand(b){
+  const skus=new Set(PRODUCTS.filter(p=>p.brand===b).map(p=>p.sku));
+  // remove products of this brand
+  for(let i=PRODUCTS.length-1;i>=0;i--){ if(PRODUCTS[i].brand===b) PRODUCTS.splice(i,1); }
+  // remove ledger rows referencing those SKUs (or matching the brand)
+  for(let i=INWARD.length-1;i>=0;i--){ if(INWARD[i].brand===b || skus.has(INWARD[i].sku)) INWARD.splice(i,1); }
+  for(let i=OUTWARD.length-1;i>=0;i--){ if(skus.has(OUTWARD[i].sku)) OUTWARD.splice(i,1); }
+  for(let i=TRANSFERS.length-1;i>=0;i--){ if(skus.has(TRANSFERS[i].sku)) TRANSFERS.splice(i,1); }
+  // unlink from users
+  USERS.forEach(u=>{ if(u.brands) u.brands=u.brands.filter(x=>x!==b); });
+  const idx=BRANDS.indexOf(b); if(idx>=0) BRANDS.splice(idx,1);
+  recomputeStock();        // FIXED (Issue 4): clears any stock tied to removed SKUs
+  touchUpdated();          // ADDED (Issue 3)
+  toast('Brand and its products removed');
+  RENDER.brands();
+}
 
 /* ============================================================
    ADMIN — WAREHOUSES
@@ -1576,7 +1723,10 @@ function deleteUser(id){ const i=USERS.findIndex(x=>x.id===id); if(i<0)return; c
     'openModal','closeModal','_runModalSave','confirmAction','_runConfirm',
     'askRemoveBrand','askRemoveWarehouse','askDeleteUser','askDeleteInward','askDeleteOutward','askDeleteChannel',
     'editBrand','updateBrand','editWarehouse','updateWarehouse','editUser',
-    'addChannel','editChannel','removeChannel'];
+    'addChannel','editChannel','removeChannel',
+    'recomputeStock','touchUpdated','fmtUpdated','loadLastUpdated','refreshImportSection',
+    'deleteTransfer','askDeleteTransfer','downloadTransferTemplate','handleTransferUpload',
+    'confirmUpload','manageBrandProducts','editProduct','askDeleteProduct','deleteProduct'];
   names.forEach(function(n){ try{ if(typeof eval(n)==='function') window[n]=eval(n); }catch(e){} });
   window.RENDER=RENDER;
   function runAttr(el,attr){ var code=el.getAttribute(attr); if(!code)return; try{ (new Function('event','with(window){ '+code+' }')).call(el,(typeof window!=='undefined'&&window.event)||null); }catch(err){ if(window.console)console.error('handler error:',code,err); } }
@@ -1639,7 +1789,13 @@ function _runConfirm(){ const fn=window._confirmYes; closeModal(); if(typeof fn=
    FEATURE 3 — delete confirmation wrappers
    (These are what the table buttons now call.)
 ============================================================ */
-function askRemoveBrand(b){ confirmAction(`Are you sure you want to delete the brand "${b}"? This cannot be undone.`, ()=>removeBrand(b)); }
+function askRemoveBrand(b){
+  var n=(typeof PRODUCTS!=='undefined')?PRODUCTS.filter(function(p){return p.brand===b;}).length:0;
+  var msg = n>0
+    ? `Deleting the brand "${b}" will also delete all ${n} linked product(s) and their inward/outward/transfer records. This cannot be undone. Continue?`
+    : `Are you sure you want to delete the brand "${b}"? This cannot be undone.`;
+  confirmAction(msg, ()=>removeBrand(b));
+}
 function askRemoveWarehouse(w){ confirmAction(`Are you sure you want to delete the warehouse "${w}"? This cannot be undone.`, ()=>removeWarehouse(w)); }
 function askDeleteUser(id){ const u=(USERS.find(x=>x.id===id)||{}); confirmAction(`Are you sure you want to delete the user "${u.name||''}"? This cannot be undone.`, ()=>deleteUser(id)); }
 function askDeleteInward(id){ confirmAction('Are you sure you want to delete this inward record? Stock will be reversed.', ()=>deleteInward(id)); }
@@ -1784,6 +1940,110 @@ function removeChannel(ch){
   names.forEach(function(n){ try{ if(typeof eval(n)==='function') window[n]=eval(n); }catch(e){} });
 })();
 
+/* ============================================================
+   ENTOEN — FIXES PATCH (additive; loads after updates-patch.js)
+   Issue 2: Manage products under a brand (view / edit / delete)
+   Issue 6: Upload confirmation popup (inward / outward / transfer)
+   Reuses existing openModal / confirmAction / recomputeStock /
+   touchUpdated / toast helpers. Nothing existing is removed.
+============================================================ */
+
+/* ---------- Issue 6: confirmation before processing an upload ---------- */
+// ADDED: shows a preview + "Are you sure you want to proceed with this upload?"
+function confirmUpload(kind, count, previewLines, onConfirm){
+  var label = kind.charAt(0).toUpperCase()+kind.slice(1);
+  var preview = (previewLines&&previewLines.length)
+    ? '<div class="upload-preview"><div class="up-title">Preview (first '+previewLines.length+'):</div>'
+      + previewLines.map(function(l){return '<div class="up-row">'+esc(l)+'</div>';}).join('')
+      + (count>previewLines.length?'<div class="up-more">…and '+(count-previewLines.length)+' more row(s)</div>':'')
+      + '</div>'
+    : '';
+  var body = '<p style="font-size:14px;line-height:1.5;margin-bottom:6px">'
+    + label+' upload validated: <b>'+count+'</b> row(s) ready.<br>Are you sure you want to proceed with this upload?</p>'
+    + preview;
+  if(typeof openModal==='function'){
+    openModal('Confirm '+label+' upload', body, function(){
+      closeModal();
+      if(typeof onConfirm==='function') onConfirm();
+    }, 'Confirm & process');
+  } else {
+    if(confirm('Are you sure you want to proceed with this upload? ('+count+' rows)')) onConfirm();
+  }
+}
+
+/* ---------- Issue 2: manage products under a brand ---------- */
+// ADDED: list products for a brand with edit + delete, inside a modal
+function manageBrandProducts(brand){
+  if(typeof openModal!=='function'){ toast('Product manager unavailable'); return; }
+  var list = PRODUCTS.filter(function(p){return p.brand===brand;});
+  var rows = list.length
+    ? list.map(function(p){
+        return '<tr>'
+          + '<td class="sku-cell">'+esc(p.sku)+'</td>'
+          + '<td>'+esc(p.name)+'</td>'
+          + '<td class="num mono">'+inr(p.cost||0)+'</td>'
+          + '<td class="num mono">'+inr(p.price||0)+'</td>'
+          + '<td class="num">'
+            + '<button class="btn btn-ghost" style="padding:5px 9px" data-onclick="editProduct(\''+esc(p.sku)+'\')">Edit</button>'
+            + '<button class="btn btn-ghost btn-del" style="padding:5px 9px" data-onclick="askDeleteProduct(\''+esc(p.sku)+'\')">Delete</button>'
+          + '</td></tr>';
+      }).join('')
+    : '<tr><td colspan="5" style="color:var(--ink-soft);font-size:13px;padding:10px">No products under this brand yet.</td></tr>';
+  var body = '<div class="table-scroll"><table>'
+    + '<thead><tr><th>SKU</th><th>Product</th><th class="num">Cost</th><th class="num">Price</th><th></th></tr></thead>'
+    + '<tbody>'+rows+'</tbody></table></div>';
+  openModal('Products — '+brand, body, function(){ closeModal(); }, 'Done');
+}
+
+// ADDED: edit a product (validation applied)
+function editProduct(sku){
+  var p=prod(sku); if(!p||!p.sku){ toast('Product not found'); return; }
+  openModal('Edit product · '+sku,
+    '<div class="fg-field"><label>Product name <span class="req">*</span></label><input id="ep_name" value="'+esc(p.name)+'"></div>'
+    +'<div class="fg-field"><label>Unit cost (AED)</label><input id="ep_cost" type="number" value="'+(p.cost||0)+'"></div>'
+    +'<div class="fg-field"><label>Selling price (AED)</label><input id="ep_price" type="number" value="'+(p.price||0)+'"></div>'
+    +'<div class="fg-field"><label>Reorder point</label><input id="ep_reorder" type="number" value="'+(p.reorder||0)+'"></div>'
+    +'<div class="fg-field"><label>Max level</label><input id="ep_max" type="number" value="'+(p.max||0)+'"></div>',
+    function(){
+      var name=(document.getElementById('ep_name').value||'').trim();
+      if(!name){ showFieldError('modalErr','Product name is required'); return; }
+      p.name=name;
+      p.cost=parseInt(document.getElementById('ep_cost').value)||0;
+      p.price=parseInt(document.getElementById('ep_price').value)||0;
+      p.reorder=parseInt(document.getElementById('ep_reorder').value)||0;
+      p.max=parseInt(document.getElementById('ep_max').value)||0;
+      recomputeStock(); touchUpdated();
+      if(window.LIVE && typeof liveUpdateProduct==='function'){ liveUpdateProduct(sku,p); }
+      closeModal(); toast('Product updated · '+sku);
+      if(typeof RENDER!=='undefined' && RENDER.brands) RENDER.brands();
+    }, 'Save changes');
+}
+
+// ADDED: delete a product (+ its ledger rows), with confirmation
+function askDeleteProduct(sku){
+  var msg='Delete product "'+sku+'" and all its inward/outward/transfer records? This cannot be undone.';
+  if(typeof confirmAction==='function') confirmAction(msg, function(){ deleteProduct(sku); });
+  else if(confirm(msg)) deleteProduct(sku);
+}
+function deleteProduct(sku){
+  for(var i=PRODUCTS.length-1;i>=0;i--){ if(PRODUCTS[i].sku===sku) PRODUCTS.splice(i,1); }
+  for(var a=INWARD.length-1;a>=0;a--){ if(INWARD[a].sku===sku) INWARD.splice(a,1); }
+  for(var b=OUTWARD.length-1;b>=0;b--){ if(OUTWARD[b].sku===sku) OUTWARD.splice(b,1); }
+  for(var c=TRANSFERS.length-1;c>=0;c--){ if(TRANSFERS[c].sku===sku) TRANSFERS.splice(c,1); }
+  recomputeStock(); touchUpdated();
+  if(window.LIVE && typeof liveDeleteProduct==='function'){ liveDeleteProduct(sku); }
+  toast('Product deleted · '+sku);
+  closeModal();
+  if(typeof RENDER!=='undefined' && RENDER.brands) RENDER.brands();
+}
+
+/* ---------- expose for the CSP-safe delegation layer ---------- */
+(function(){
+  var names=['confirmUpload','manageBrandProducts','editProduct','askDeleteProduct','deleteProduct',
+    'downloadTransferTemplate','handleTransferUpload','deleteTransfer','askDeleteTransfer'];
+  names.forEach(function(n){ try{ if(typeof eval(n)==='function') window[n]=eval(n); }catch(e){} });
+})();
+
 </script>
 <script>
 /* ============================================================
@@ -1801,7 +2061,18 @@ const SUPABASE_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFz
 
 const LIVE = (SUPABASE_URL.indexOf('YOUR-PROJECT') === -1);  // true once you paste real keys
 let sb = null;
-if (LIVE && window.supabase) { sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON); }
+// FIXED (Issue 1): persist the auth session across refreshes (localStorage) and auto-refresh tokens.
+if (LIVE && window.supabase) {
+  sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON, {
+    auth: {
+      persistSession: true,
+      autoRefreshToken: true,
+      detectSessionInUrl: true,
+      storage: window.localStorage,
+      storageKey: 'entoen_auth'
+    }
+  });
+}
 
 /* maps so we can translate names <-> uuids the UI never sees */
 let BRAND_ID = {};   // name -> id
@@ -1902,6 +2173,26 @@ async function liveSetPassword(newPass){
 }
 async function liveLogout(){ if(sb) await sb.auth.signOut(); }
 
+// ADDED (Issue 1): on page load, restore an existing session so a refresh keeps the user logged in.
+async function liveRestoreSession(){
+  if(!LIVE || !sb) return null;
+  const { data:{ session } } = await sb.auth.getSession();
+  if(!session || !session.user) return null;               // no/expired session → normal login
+  const user = session.user;
+  const { data: profile } = await sb.from('profiles').select('*, user_brands(brand_id)').eq('id', user.id).single();
+  if(!profile || !profile.active){ await sb.auth.signOut(); return null; }
+  CURRENT = {
+    id: profile.id, name: profile.name, email: profile.email,
+    role: profile.role==='admin' ? 'admin' : 'brand',
+    brands: [], active: profile.active, mustReset: profile.must_reset_password
+  };
+  ROLE = CURRENT.role;
+  const { data: brands } = await sb.from('brands').select('*');
+  BRAND_NAME={}; (brands||[]).forEach(b=>BRAND_NAME[b.id]=b.name);
+  CURRENT.brands = (profile.user_brands||[]).map(x=>BRAND_NAME[x.brand_id]).filter(Boolean);
+  return CURRENT;
+}
+
 /* ---------- WRITES (persist then reload) ---------- */
 async function liveAddBrand(name){ const { error } = await sb.from('brands').insert({ name }); if(error) throw error; await liveLoadAll(); }
 async function liveRemoveBrand(name){ const id=BRAND_ID[name]; if(!id) return; const { error } = await sb.from('brands').delete().eq('id', id); if(error) throw error; await liveLoadAll(); }
@@ -1992,6 +2283,27 @@ async function liveAddChannel(name){ const { error } = await sb.from('channels')
 async function liveUpdateChannel(oldName, newName){ const { error } = await sb.from('channels').update({ name:newName }).eq('name', oldName); if(error) throw error; }
 async function liveRemoveChannel(name){ const { error } = await sb.from('channels').delete().eq('name', name); if(error) throw error; }
 
+/* ---------- PRODUCTS edit/delete (Issue 2) ---------- */
+async function liveUpdateProduct(sku, p){
+  const id=PROD_ID[sku]; if(!id) return;
+  const { error } = await sb.from('products').update({
+    name:p.name, unit_cost:p.cost, unit_price:p.price, reorder_point:p.reorder, max_level:p.max
+  }).eq('id', id);
+  if (error) throw error; await liveLoadAll();
+}
+async function liveDeleteProduct(sku){
+  const id=PROD_ID[sku]; if(!id) return;
+  // ON DELETE cascade in the DB removes linked inward/outward rows; stock view recomputes.
+  const { error } = await sb.from('products').delete().eq('id', id);
+  if (error) throw error; await liveLoadAll();
+}
+
+/* ---------- TRANSFER delete (Issue 5) ---------- */
+async function liveDeleteTransfer(id){
+  const { error } = await sb.from('transfers').delete().eq('id', id);
+  if (error) throw error; await liveLoadAll();
+}
+
 </script>
 <script>
 /* ============================================================
@@ -2058,9 +2370,15 @@ async function liveRemoveChannel(name){ const { error } = await sb.from('channel
     try{ await liveAddBrand(n); toast('Brand created · '+n); RENDER.brands(); }
     catch(e){ toast(e.message||'Could not create brand'); }
   };
+  // UPDATED (Issue 2): cascade delete linked products (DB removes their records), then the brand
   window.removeBrand = async function(b){
-    try{ await liveRemoveBrand(b); toast('Brand removed'); RENDER.brands(); }
-    catch(e){ toast('Remove that brand’s products first'); }
+    try{
+      const skus=PRODUCTS.filter(p=>p.brand===b).map(p=>PROD_ID[p.sku]).filter(Boolean);
+      if(skus.length){ await sb.from('products').delete().in('id', skus); }
+      await liveRemoveBrand(b);
+      touchUpdated();
+      toast('Brand and its products removed'); RENDER.brands();
+    }catch(e){ toast(e.message||'Could not delete brand'); }
   };
 
   // ---------- WAREHOUSES ----------
@@ -2192,9 +2510,38 @@ async function liveRemoveChannel(name){ const { error } = await sb.from('channel
   // deleting an auth user needs admin API; disable in-browser delete when live
   window.deleteUser = function(){ toast('Disable the user instead, or remove them in Supabase → Authentication'); };
 
+  // ---------- TRANSFER delete (Issue 5, live) ----------
+  window.deleteTransfer = async function(id){
+    try{ await liveDeleteTransfer(id); touchUpdated(); toast('Transfer deleted'); renderTransferTab(); }
+    catch(e){ toast(e.message||'Could not delete transfer'); }
+  };
+
+  // ---------- PRODUCT edit/delete (Issue 2, live) ----------
+  window.deleteProduct = async function(sku){
+    try{ await liveDeleteProduct(sku); touchUpdated(); toast('Product deleted · '+sku); if(typeof closeModal==='function')closeModal(); RENDER.brands(); }
+    catch(e){ toast(e.message||'Could not delete product'); }
+  };
+
+  // touchUpdated after live create/delete of records (Issue 3)
+  const _wrap=(fnName)=>{ const orig=window[fnName]; if(typeof orig==='function'){ window[fnName]=async function(){ const r=await orig.apply(this,arguments); try{touchUpdated();}catch(e){} return r; }; } };
+  ['deleteInward','deleteOutward','saveInward','saveOutward','saveTransfer','createUser'].forEach(_wrap);
+
   // ---------- CSV IMPORTS: reload from DB after import ----------
   const _hi = window.handleInwardUpload;
   // (imports already call RENDER.inward(); with live writes they persist per row via saveInward path)
+
+  // ADDED (Issue 1): auto-login on refresh if a valid session exists.
+  async function _bootSession(){
+    try{
+      const user = await liveRestoreSession();
+      if(!user) return;                     // no session → stay on login page
+      if(user.mustReset){ showPasswordReset(user); return; }
+      await liveLoadAll();
+      enterApp(user);
+    }catch(e){ /* stay on login on any error */ }
+  }
+  if(document.readyState==='loading'){ document.addEventListener('DOMContentLoaded', _bootSession); }
+  else { _bootSession(); }
 })();
 
 </script>
