@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>ENTOEN - BRANDS OPERATION</title>
+<title>StockPulse — Inventory & Sales Command Center</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
 <style>
 :root{
@@ -284,7 +284,26 @@ tbody tr:last-child td{border-bottom:none}
   table{font-size:12.5px}
   .content{overflow-x:auto}
 }
-.table-scroll{overflow-x:auto}
+.table-scroll{overflow-x:auto;-webkit-overflow-scrolling:touch;scroll-behavior:smooth}
+/* FIX (Priority 4): product catalog table — consistent columns, sticky header, smooth scroll */
+.pm-scroll{max-height:60vh;overflow-y:auto}
+.pm-table{width:100%;border-collapse:collapse;table-layout:auto;min-width:640px}
+.pm-table thead th{position:sticky;top:0;z-index:2;background:var(--card);box-shadow:0 1px 0 var(--line)}
+.pm-table th,.pm-table td{white-space:nowrap;text-align:left;padding:9px 12px;vertical-align:middle}
+.pm-table th.num,.pm-table td.num{text-align:right}
+.pm-table th:nth-child(1),.pm-table td:nth-child(1){min-width:120px}
+.pm-table th:nth-child(2),.pm-table td:nth-child(2){min-width:200px;white-space:normal}
+.pm-table th:nth-child(3),.pm-table td:nth-child(3){min-width:120px}
+.pm-table th:nth-child(4),.pm-table td:nth-child(4){min-width:120px}
+.pm-table th:nth-child(7),.pm-table td:nth-child(7){min-width:150px;text-align:right}
+.pm-table tbody tr:hover{background:var(--bg)}
+/* multi-line intake table */
+.line-table{width:100%;border-collapse:collapse;min-width:640px}
+.line-table th,.line-table td{padding:6px 8px;vertical-align:middle}
+.line-table th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--ink-soft);text-align:left}
+.line-table th.num,.line-table td.num{text-align:right}
+.line-table select,.line-table input{width:100%;box-sizing:border-box}
+@media(max-width:760px){.pm-table,.line-table{min-width:560px}}
 /* BOE grouped inward (client view) */
 .boe-card{margin-bottom:18px;padding:0;overflow:hidden}
 .boe-head{display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap;
@@ -654,6 +673,7 @@ const NAV = [
   ]},
   {group:'Administration', adminOnly:true, items:[
     {id:'brands', label:'Brands', icon:'tag', adminOnly:true},
+    {id:'products', label:'Products', icon:'box', adminOnly:true},
     {id:'warehouses', label:'Warehouses', icon:'building', adminOnly:true},
     {id:'channels', label:'Sales Channels', icon:'tag', adminOnly:true},
     {id:'users', label:'Users', icon:'users', adminOnly:true},
@@ -686,7 +706,7 @@ function buildNav(){
   }).join('');
 }
 function go(page){
-  const adminPages=['brands','warehouses','users','channels'];
+  const adminPages=['brands','products','warehouses','users','channels'];
   if(adminPages.includes(page) && !isAdmin()) page='dashboard';
   document.querySelectorAll('.nav-item').forEach(n=>n.classList.toggle('active',n.dataset.page===page));
   (RENDER[page]||RENDER.dashboard)();
@@ -715,6 +735,8 @@ function touchUpdated(){
 function loadLastUpdated(){
   try{ LAST_UPDATED = localStorage.getItem('entoen_last_updated'); }catch(e){ LAST_UPDATED=null; }
 }
+// ADDED: guarded call so patch files can invoke it before/without full init
+function touchUpdatedSafe(){ try{ if(typeof touchUpdated==='function') touchUpdated(); }catch(e){} }
 function fmtUpdated(iso){
   if(!iso) return '—';
   const d=new Date(iso); if(isNaN(d)) return '—';
@@ -722,10 +744,11 @@ function fmtUpdated(iso){
   return `${p(d.getDate())}-${p(d.getMonth()+1)}-${d.getFullYear()} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
-const IMPORT_ERR = { inward:null, outward:null, transfer:null }; // UPDATED (Issue 5): + transfer
+const IMPORT_ERR = { inward:null, outward:null, transfer:null, product:null }; // UPDATED (Priority 2A): + product
 function refreshImportSection(section){ // ADDED (Issue 5)
   if(section==='inward') RENDER.inward();
   else if(section==='transfer'){ if(typeof renderTransferTab==='function') renderTransferTab(); }
+  else if(section==='product'){ if(RENDER.products) RENDER.products(); }
   else { const b=document.getElementById('outBody'); if(b) renderSalesTab(); else RENDER.outward(); }
 }
 function showImportError(section, summary, details){ IMPORT_ERR[section]={summary,details:details||[]}; refreshImportSection(section); }
@@ -873,52 +896,31 @@ RENDER.inward=function(){
 function renderInwardAdmin(){
   const rows=scopeInward();
   const canRecord = PRODUCTS.length && WAREHOUSES.length;
+  // UPDATED (Priority 2): parent (BOE/PO/Date/Supplier) + child product line items.
+  // UPDATED (Priority 4): product master creation moved to its own module (RENDER.products).
   C.innerHTML=`
-  <div class="grid-2b" style="grid-template-columns:1.5fr 1fr">
-    <div class="card">
-      <div class="card-head"><div><h3>Record new intake</h3><div class="ch-sub">Purchase or customer return, against a BOE declaration</div></div></div>
-      ${!canRecord ? `<p style="color:var(--ink-soft);font-size:13px">Add at least one product and one warehouse first (Administration → Brands / Warehouses, and create products via intake once ready).</p>` : `
-      <div id="in_err" class="field-error" style="display:none"></div>
-      <div class="form-grid">
-        <div class="fg-field"><label>Entry Type <span class="req">*</span></label><select id="in_type"><option>Purchase</option><option>Return</option></select></div>
-        <div class="fg-field"><label>BOE Declaration No. <span class="req">*</span></label><input id="in_boe" placeholder="BOE-000001"></div>
-        <div class="fg-field"><label>PO Number <span class="req">*</span></label><input id="in_po" placeholder="PO-000001"></div>
-        <div class="fg-field"><label>Product SKU <span class="req">*</span></label><select id="in_sku" data-onchange="inwardPick()">${scopeProducts().map(p=>`<option value="${esc(p.sku)}">${esc(p.sku)} — ${esc(p.name)}</option>`).join('')}</select></div>
-        <div class="fg-field"><label>Supplier <span class="req">*</span></label><input id="in_supplier" placeholder="Supplier name"></div>
-        <div class="fg-field"><label>Brand <span class="req">*</span></label><input id="in_brand" readonly></div>
-        <div class="fg-field"><label>Quantity <span class="req">*</span></label><input id="in_qty" type="number" min="1" placeholder="100" data-oninput="inwardCalc()"></div>
-        <div class="fg-field"><label>Value (AED)</label><input id="in_value" type="number" placeholder="auto from cost"></div>
-        <div class="fg-field"><label>Warehouse <span class="req">*</span></label><select id="in_wh">${WAREHOUSES.map(w=>`<option>${esc(w)}</option>`).join('')}</select></div>
-        <div class="fg-field"><label>Date <span class="req">*</span></label><input id="in_date" type="date" value="2026-07-07"></div>
-        <div class="fg-field"><label>GRN / Declaration</label><input id="in_grn" placeholder="GRN-0001"></div>
-        <div class="fg-field" style="justify-content:flex-end"><button class="btn btn-teal" data-onclick="saveInward()">Save intake</button></div>
-      </div>`}
+  <div class="card" style="margin-bottom:16px">
+    <div class="card-head"><div><h3>Record new intake</h3><div class="ch-sub">One BOE &amp; PO, with one or more product line items</div></div>
+      <div class="spacer"></div><button class="btn btn-ghost" data-onclick="go('products')">Manage products →</button></div>
+    ${!canRecord ? `<p style="color:var(--ink-soft);font-size:13px">Add at least one product (Administration → Products) and one warehouse first.</p>` : `
+    <div id="in_err" class="field-error" style="display:none"></div>
+    <!-- PARENT header -->
+    <div class="form-grid">
+      <div class="fg-field"><label>Entry Type <span class="req">*</span></label><select id="in_type"><option>Purchase</option><option>Return</option></select></div>
+      <div class="fg-field"><label>BOE Declaration No. <span class="req">*</span></label><input id="in_boe" placeholder="BOE-000001"></div>
+      <div class="fg-field"><label>PO Number <span class="req">*</span></label><input id="in_po" placeholder="PO-000001"></div>
+      <div class="fg-field"><label>Supplier <span class="req">*</span></label><input id="in_supplier" placeholder="Supplier name"></div>
+      <div class="fg-field"><label>Date <span class="req">*</span></label><input id="in_date" type="date" value="2026-07-07"></div>
+      <div class="fg-field"><label>GRN / Declaration</label><input id="in_grn" placeholder="GRN-0001"></div>
     </div>
-    <div class="card">
-      <div class="card-head"><div><h3>Add a product</h3><div class="ch-sub">Create SKUs to receive against</div></div></div>
-      <div class="form-grid" style="grid-template-columns:1fr">
-        <div class="fg-field"><label>SKU code</label><input id="p_sku" placeholder="SKU-001"></div>
-        <div class="fg-field"><label>Product name</label><input id="p_name" placeholder="Product name"></div>
-        <div class="fg-field"><label>Brand</label><select id="p_brand">${BRANDS.map(b=>`<option>${esc(b)}</option>`).join('')||'<option value="">Create a brand first</option>'}</select></div>
-        <div class="form-grid" style="grid-template-columns:1fr 1fr;margin:0">
-          <div class="fg-field"><label>Unit cost (AED)</label><input id="p_cost" type="number" placeholder="0"></div>
-          <div class="fg-field"><label>Unit price (AED)</label><input id="p_price" type="number" placeholder="0"></div>
-        </div>
-        <div class="form-grid" style="grid-template-columns:1fr 1fr;margin:0">
-          <div class="fg-field"><label>Reorder point</label><input id="p_reorder" type="number" placeholder="0"></div>
-          <div class="fg-field"><label>Max level</label><input id="p_max" type="number" placeholder="0"></div>
-        </div>
-      </div>
-      <button class="btn btn-ghost" style="width:100%;justify-content:center" data-onclick="saveProduct()">Add product</button>
-      <div class="upload-sep">Bulk upload inward (CSV)</div>
-      <label class="drop-zone" for="inwardFile">
-        <svg class="dz-ic" fill="none" stroke="currentColor" stroke-width="1.7" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12"/></svg>
-        <h4>Drop your inward file here</h4>
-        <p>or <span class="link">browse</span> · .csv up to 10MB</p>
-      </label>
-      <input type="file" id="inwardFile" accept=".csv" style="display:none" data-onchange="handleInwardUpload(this)">
-      <button class="btn btn-ghost" style="width:100%;justify-content:center;margin-top:10px" data-onclick="downloadInwardTemplate()">Download inward CSV template</button>
-    </div>
+    <!-- CHILD line items -->
+    <div class="line-head"><h4 style="margin:14px 0 8px;font-size:14px">Product line items <span class="req">*</span></h4></div>
+    <div class="table-scroll"><table class="line-table">
+      <thead><tr><th style="min-width:220px">Product / SKU</th><th style="min-width:120px" class="num">Quantity</th><th style="min-width:140px" class="num">Value (AED)</th><th style="min-width:150px">Warehouse</th><th style="width:46px"></th></tr></thead>
+      <tbody id="in_lines"></tbody>
+    </table></div>
+    <button class="btn btn-ghost" style="margin-top:10px" data-onclick="addInwardLine()">+ Add Product</button>
+    <div style="display:flex;justify-content:flex-end;margin-top:12px"><button class="btn btn-teal" data-onclick="saveInward()">Save intake</button></div>`}
   </div>
   ${importErrorBanner('inward')}
   <div class="card">
@@ -926,6 +928,7 @@ function renderInwardAdmin(){
       <div class="spacer"></div><button class="btn btn-ghost" data-onclick="exportInward()">Export</button></div>
     ${rows.length? renderInwardGroups(rows, true) : `<p style="color:var(--ink-soft);font-size:13px;padding:8px 0">No inward records yet.</p>`}
   </div>`;
+  if(canRecord){ INWARD_LINES=[]; addInwardLine(); }
 }
 /* Shared BOE › PO › SKU drilldown. showDelete=admin only. */
 let BOE_OPEN={};
@@ -967,7 +970,7 @@ function renderInwardGroups(rows, showDelete){
               <td class="num mono">${inr(prod(r.sku).cost||0)}</td>
               <td class="num mono">${inr(r.value)}</td>
               <td>${esc(r.grn)}</td>
-              ${showDelete?`<td class="num"><button class="btn btn-ghost btn-del" data-onclick="askDeleteInward('${r.id}')">Delete</button></td>`:''}
+              ${showDelete?`<td class="num"><button class="btn btn-ghost" style="padding:5px 9px" data-onclick="editInward('${r.id}')">Edit</button> <button class="btn btn-ghost btn-del" style="padding:5px 9px" data-onclick="askDeleteInward('${r.id}')">Delete</button></td>`:''}
             </tr>`).join('')}</tbody>
           </table></div>
         </div>`).join('') : ''}
@@ -982,34 +985,78 @@ function renderInwardClient(){
 function inwardPick(){ const p=prod(document.getElementById('in_sku').value); const bf=document.getElementById('in_brand'); if(bf) bf.value=p.brand||''; inwardCalc(); }
 function inwardCalc(){ const p=prod(document.getElementById('in_sku').value); const qty=parseInt(document.getElementById('in_qty').value)||0; const vf=document.getElementById('in_value'); if(qty&&p.cost&&!vf.dataset.touched) vf.value=qty*p.cost; }
 // UPDATED (Feature 2 + 8): all listed fields mandatory; supplier & brand separate & required
+// ADDED (Priority 2): dynamic child line-items state for multi-product intake
+let INWARD_LINES = [];
+let _inLineSeq = 0;
+function addInwardLine(){
+  const lid = 'L'+(++_inLineSeq);
+  INWARD_LINES.push({ lid, sku:(scopeProducts()[0]||{}).sku||'', qty:'', value:'', wh:WAREHOUSES[0]||'' });
+  renderInwardLines();
+}
+function removeInwardLine(lid){
+  INWARD_LINES = INWARD_LINES.filter(l=>l.lid!==lid);
+  if(!INWARD_LINES.length) addInwardLine(); else renderInwardLines();
+}
+function syncInwardLine(lid, field, val){
+  const l=INWARD_LINES.find(x=>x.lid===lid); if(!l) return;
+  l[field]=val;
+  if(field==='sku' || field==='qty'){ // auto value from cost if value not manually set
+    const p=prod(l.sku); const q=parseInt(l.qty)||0;
+    if(p && p.cost && (!l.value || l._autoval)){ l.value=q*p.cost; l._autoval=true; renderInwardLines(); }
+  }
+  if(field==='value'){ l._autoval=false; }
+}
+function renderInwardLines(){
+  const body=document.getElementById('in_lines'); if(!body) return;
+  const opts=scopeProducts().map(p=>`<option value="${esc(p.sku)}">${esc(p.sku)} — ${esc(p.name)}</option>`).join('');
+  body.innerHTML = INWARD_LINES.map(l=>`<tr>
+    <td><select data-onchange="syncInwardLine('${l.lid}','sku',this.value)">${opts.replace(`value="${esc(l.sku)}"`,`value="${esc(l.sku)}" selected`)}</select></td>
+    <td class="num"><input type="number" min="1" value="${esc(String(l.qty))}" placeholder="0" data-oninput="syncInwardLine('${l.lid}','qty',this.value)"></td>
+    <td class="num"><input type="number" value="${esc(String(l.value))}" placeholder="auto" data-oninput="syncInwardLine('${l.lid}','value',this.value)"></td>
+    <td><select data-onchange="syncInwardLine('${l.lid}','wh',this.value)">${WAREHOUSES.map(w=>`<option${w===l.wh?' selected':''}>${esc(w)}</option>`).join('')}</select></td>
+    <td class="num"><button class="btn btn-ghost btn-del" style="padding:5px 9px" data-onclick="removeInwardLine('${l.lid}')" title="Remove line">✕</button></td>
+  </tr>`).join('');
+}
 function saveInward(){
   const type=(document.getElementById('in_type')||{}).value||'';
   const boe=(document.getElementById('in_boe').value||'').trim();
   const po=(document.getElementById('in_po').value||'').trim();
-  const sku=document.getElementById('in_sku').value||'';
   const supplier=(document.getElementById('in_supplier').value||'').trim();
-  const brand=(document.getElementById('in_brand').value||'').trim();
-  const qty=parseInt(document.getElementById('in_qty').value)||0;
-  const wh=document.getElementById('in_wh').value||'';
   const date=document.getElementById('in_date').value||'';
+  const grn=(document.getElementById('in_grn').value||'').trim();
+  // header validation — BOE + PO required once only (Priority 2)
   const missing=[];
   if(!type) missing.push('Entry Type');
   if(!boe) missing.push('BOE');
   if(!po) missing.push('PO');
-  if(!sku) missing.push('Product / SKU');
   if(!supplier) missing.push('Supplier');
-  if(!brand) missing.push('Brand');
-  if(!qty) missing.push('Quantity');
-  if(!wh) missing.push('Warehouse');
   if(!date) missing.push('Date');
-  if(missing.length){ showFieldError('in_err','Please fill all required fields: '+missing.join(', ')); return; }
+  if(missing.length){ showFieldError('in_err','Please fill all required header fields: '+missing.join(', ')); return; }
+  // line validation — at least one valid product line
+  const valid=[]; const seen={};
+  for(const l of INWARD_LINES){
+    const q=parseInt(l.qty)||0;
+    if(!l.sku || !q || !l.wh) continue;               // skip empty/incomplete lines
+    const key=l.sku+'@'+l.wh;
+    if(seen[key]){ showFieldError('in_err',`Duplicate product row: ${l.sku} in ${l.wh}. Merge the quantities into one line.`); return; } // prevent duplicate rows
+    seen[key]=true;
+    const p=prod(l.sku);
+    valid.push({ sku:l.sku, qty:q, value:parseInt(l.value)||q*((p&&p.cost)||0), wh:l.wh, brand:(p&&p.brand)||'' });
+  }
+  if(!valid.length){ showFieldError('in_err','Add at least one product line with SKU, quantity and warehouse.'); return; }
   clearFieldError('in_err');
-  const p=prod(sku);
-  const val=parseInt(document.getElementById('in_value').value)||qty*(p.cost||0);
-  const grn=(document.getElementById('in_grn').value||'').trim();
-  INWARD.unshift({id:nextId('IN'),type,boe,po,supplier,brand,sku,qty,value:val,wh,date,grn});
-  recomputeStock(); touchUpdated(); // FIXED (Issue 4) + ADDED (Issue 3)
-  toast(`${type} saved · +${qty} ${sku} to ${wh}`);
+  // one INWARD record per line, all sharing the same BOE / PO / supplier / date (parent-child)
+  if(window.LIVE && typeof liveAddInwardBatch==='function'){
+    liveAddInwardBatch({type,boe,po,supplier,date,grn}, valid)
+      .then(()=>{ toast(`${type} saved · ${valid.length} line(s) under ${boe}`); RENDER.inward(); })
+      .catch(e=>{ showFieldError('in_err', e.message||'Could not save intake'); });
+    return;
+  }
+  valid.forEach(v=>{
+    INWARD.unshift({id:nextId('IN'),type,boe,po,supplier,brand:v.brand,sku:v.sku,qty:v.qty,value:v.value,wh:v.wh,date,grn});
+  });
+  recomputeStock(); touchUpdated();
+  toast(`${type} saved · ${valid.length} line(s) under ${boe}`);
   RENDER.inward();
 }
 function deleteInward(id){
@@ -1726,7 +1773,10 @@ function deleteUser(id){ const i=USERS.findIndex(x=>x.id===id); if(i<0)return; c
     'addChannel','editChannel','removeChannel',
     'recomputeStock','touchUpdated','fmtUpdated','loadLastUpdated','refreshImportSection',
     'deleteTransfer','askDeleteTransfer','downloadTransferTemplate','handleTransferUpload',
-    'confirmUpload','manageBrandProducts','editProduct','askDeleteProduct','deleteProduct'];
+    'confirmUpload','manageBrandProducts','editProduct','askDeleteProduct','deleteProduct',
+    'addInwardLine','removeInwardLine','syncInwardLine','renderInwardLines','touchUpdatedSafe',
+    'saveProductMaster','handleProductUpload','downloadProductTemplate',
+    'editInward','saveInwardEdit','addEditLine','removeEditLine','syncEditLine'];
   names.forEach(function(n){ try{ if(typeof eval(n)==='function') window[n]=eval(n); }catch(e){} });
   window.RENDER=RENDER;
   function runAttr(el,attr){ var code=el.getAttribute(attr); if(!code)return; try{ (new Function('event','with(window){ '+code+' }')).call(el,(typeof window!=='undefined'&&window.event)||null); }catch(err){ if(window.console)console.error('handler error:',code,err); } }
@@ -1868,9 +1918,16 @@ function editUser(id){
       if(!isValidEmail(email)){ showFieldError('modalErr','Please enter a valid email address'); return; }
       if(!brands.length){ showFieldError('modalErr','Select at least one brand'); return; }
       if(USERS.some(x=>x.id!==id && x.email.toLowerCase()===email.toLowerCase())){ showFieldError('modalErr','That email is already used by another account'); return; }
-      u.name=name; u.email=email; u.brands=brands;
-      if(window.LIVE && typeof liveUpdateUser==='function'){ liveUpdateUser(id,{name,email,brands}); }
-      closeModal(); toast('User updated'); RENDER.users();
+      // FIXED: persist to DB first and confirm via response BEFORE updating the UI,
+      // so newly assigned brands stay after refresh (no silent fire-and-forget).
+      if(window.LIVE && typeof liveUpdateUser==='function'){
+        liveUpdateUser(id,{name,email,brands})
+          .then(()=>{ closeModal(); toast('User updated'); RENDER.users(); })
+          .catch(e=>{ showFieldError('modalErr', e.message||'Could not update user (changes not saved)'); });
+      } else {
+        u.name=name; u.email=email; u.brands=brands;
+        touchUpdatedSafe(); closeModal(); toast('User updated'); RENDER.users();
+      }
     }, 'Save changes');
 }
 
@@ -1905,9 +1962,13 @@ function addChannel(){
   if(!n){ showFieldError('ch_err','Enter a channel name'); return; }
   if(CHANNELS.some(c=>c.toLowerCase()===n.toLowerCase())){ showFieldError('ch_err','That channel already exists'); return; }
   clearFieldError('ch_err');
-  CHANNELS.push(n);
-  if(window.LIVE && typeof liveAddChannel==='function'){ liveAddChannel(n); }
-  toast('Channel created · '+n); RENDER.channels();
+  // FIXED (Priority 1): persist to DB first (await), then refresh UI from source of truth.
+  if(window.LIVE && typeof liveAddChannel==='function'){
+    liveAddChannel(n).then(()=>{ toast('Channel created · '+n); RENDER.channels(); })
+      .catch(e=>{ showFieldError('ch_err', e.message||'Could not create channel (not saved)'); });
+  } else {
+    CHANNELS.push(n); touchUpdatedSafe(); toast('Channel created · '+n); RENDER.channels();
+  }
 }
 function editChannel(oldName){
   openModal('Edit channel',
@@ -1916,17 +1977,28 @@ function editChannel(oldName){
       const v=(document.getElementById('edit_ch').value||'').trim();
       if(!v){ showFieldError('modalErr','Channel name is required'); return; }
       if(v.toLowerCase()!==oldName.toLowerCase() && CHANNELS.some(c=>c.toLowerCase()===v.toLowerCase())){ showFieldError('modalErr','That channel already exists'); return; }
-      const i=CHANNELS.indexOf(oldName); if(i>=0) CHANNELS[i]=v;
-      OUTWARD.forEach(o=>{ if(o.channel===oldName) o.channel=v; });
-      if(window.LIVE && typeof liveUpdateChannel==='function'){ liveUpdateChannel(oldName,v); }
-      closeModal(); toast('Channel updated'); RENDER.channels();
+      // FIXED (Priority 1): persist rename to DB before updating UI.
+      if(window.LIVE && typeof liveUpdateChannel==='function'){
+        liveUpdateChannel(oldName,v).then(()=>{ OUTWARD.forEach(o=>{ if(o.channel===oldName) o.channel=v; }); closeModal(); toast('Channel updated'); RENDER.channels(); })
+          .catch(e=>{ showFieldError('modalErr', e.message||'Could not update channel'); });
+      } else {
+        const i=CHANNELS.indexOf(oldName); if(i>=0) CHANNELS[i]=v;
+        OUTWARD.forEach(o=>{ if(o.channel===oldName) o.channel=v; });
+        touchUpdatedSafe(); closeModal(); toast('Channel updated'); RENDER.channels();
+      }
     }, 'Save changes');
 }
 function removeChannel(ch){
-  const i=CHANNELS.indexOf(ch); if(i<0) return;
-  CHANNELS.splice(i,1);
-  if(window.LIVE && typeof liveRemoveChannel==='function'){ liveRemoveChannel(ch); }
-  toast('Channel removed'); RENDER.channels();
+  // FIXED (Priority 1): delete in DB and confirm via API response BEFORE touching UI state.
+  // On failure, keep the channel and show an error, so it never silently reappears on refresh.
+  if(window.LIVE && typeof liveRemoveChannel==='function'){
+    liveRemoveChannel(ch).then(()=>{ toast('Channel removed'); RENDER.channels(); })
+      .catch(e=>{ toast(e.message||'Could not delete channel — please try again'); RENDER.channels(); });
+  } else {
+    const i=CHANNELS.indexOf(ch); if(i<0) return;
+    CHANNELS.splice(i,1);
+    touchUpdatedSafe(); toast('Channel removed'); RENDER.channels();
+  }
 }
 
 /* ============================================================
@@ -2044,6 +2116,210 @@ function deleteProduct(sku){
   names.forEach(function(n){ try{ if(typeof eval(n)==='function') window[n]=eval(n); }catch(e){} });
 })();
 
+/* ============================================================
+   ENTOEN — v4 PATCH (additive; loads after fixes-patch.js)
+   Priority 2A: Product Master module (catalog only, no stock)
+   Priority 2A: Bulk product upload (CSV) with row error mapping
+   Priority 3 : Edit inward records (reverse old impact, apply new)
+   Reuses: openModal, confirmAction, recomputeStock, touchUpdated,
+           showFieldError, esc, inr, prod, RENDER, toast.
+============================================================ */
+
+/* ============================================================
+   PRIORITY 2A — PRODUCT MASTER (catalog only; does NOT touch stock)
+============================================================ */
+RENDER.products=function(){
+  if(!isAdmin()){ go('dashboard'); return; }
+  setHead('Products','Master catalog — creating products here does NOT change stock');
+  const list=PRODUCTS.slice().sort((a,b)=>(a.brand+a.sku).localeCompare(b.brand+b.sku));
+  C.innerHTML=`
+  <div class="grid-2b" style="grid-template-columns:1fr 1.5fr">
+    <div class="card">
+      <div class="card-head"><div><h3>Add product</h3><div class="ch-sub">Master data only — no inventory impact</div></div></div>
+      <div id="pm_err" class="field-error" style="display:none"></div>
+      <div class="form-grid" style="grid-template-columns:1fr">
+        <div class="fg-field"><label>SKU code <span class="req">*</span></label><input id="pm_sku" placeholder="SKU-001"></div>
+        <div class="fg-field"><label>Product name <span class="req">*</span></label><input id="pm_name" placeholder="Product name"></div>
+        <div class="fg-field"><label>Brand <span class="req">*</span></label><select id="pm_brand">${BRANDS.map(b=>`<option>${esc(b)}</option>`).join('')||'<option value="">Create a brand first</option>'}</select></div>
+        <div class="fg-field"><label>Category</label><input id="pm_cat" placeholder="e.g. Electronics"></div>
+        <div class="form-grid" style="grid-template-columns:1fr 1fr;margin:0">
+          <div class="fg-field"><label>Unit cost (AED)</label><input id="pm_cost" type="number" placeholder="0"></div>
+          <div class="fg-field"><label>Unit price (AED)</label><input id="pm_price" type="number" placeholder="0"></div>
+        </div>
+        <div class="form-grid" style="grid-template-columns:1fr 1fr;margin:0">
+          <div class="fg-field"><label>Reorder point</label><input id="pm_reorder" type="number" placeholder="0"></div>
+          <div class="fg-field"><label>Max level</label><input id="pm_max" type="number" placeholder="0"></div>
+        </div>
+      </div>
+      <button class="btn btn-teal" style="width:100%;justify-content:center" data-onclick="saveProductMaster()">Add product</button>
+      <div class="upload-sep">Bulk upload products (CSV)</div>
+      <label class="drop-zone" for="productFile">
+        <svg class="dz-ic" fill="none" stroke="currentColor" stroke-width="1.7" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12"/></svg>
+        <h4>Drop your product file here</h4><p>or <span class="link">browse</span> · .csv</p>
+      </label>
+      <input type="file" id="productFile" accept=".csv" style="display:none" data-onchange="handleProductUpload(this)">
+      <button class="btn btn-ghost" style="width:100%;justify-content:center;margin-top:10px" data-onclick="downloadProductTemplate()">Download product CSV template</button>
+    </div>
+    <div class="card">
+      <div class="card-head"><div><h3>Product catalog</h3><div class="ch-sub">${list.length} products</div></div></div>
+      ${importErrorBanner('product')}
+      ${list.length?`<div class="table-scroll pm-scroll"><table class="pm-table">
+        <thead><tr><th>SKU</th><th>Product</th><th>Brand</th><th>Category</th><th class="num">Cost</th><th class="num">Price</th><th></th></tr></thead>
+        <tbody>${list.map(p=>`<tr>
+          <td class="sku-cell">${esc(p.sku)}</td><td>${esc(p.name)}</td><td>${esc(p.brand)}</td><td>${esc(p.category||'—')}</td>
+          <td class="num mono">${inr(p.cost||0)}</td><td class="num mono">${inr(p.price||0)}</td>
+          <td class="num"><button class="btn btn-ghost" style="padding:5px 9px" data-onclick="editProduct('${esc(p.sku)}')">Edit</button>
+          <button class="btn btn-ghost btn-del" style="padding:5px 9px" data-onclick="askDeleteProduct('${esc(p.sku)}')">Delete</button></td>
+        </tr>`).join('')}</tbody>
+      </table></div>`:`<p style="color:var(--ink-soft);font-size:13px">No products yet. Add one, or bulk upload.</p>`}
+    </div>
+  </div>`;
+};
+function saveProductMaster(){
+  const sku=(document.getElementById('pm_sku').value||'').trim();
+  const name=(document.getElementById('pm_name').value||'').trim();
+  const brand=document.getElementById('pm_brand').value||'';
+  const category=(document.getElementById('pm_cat').value||'').trim();
+  if(!sku||!name){ showFieldError('pm_err','SKU and product name are required'); return; }
+  if(!brand){ showFieldError('pm_err','Create a brand first'); return; }
+  if(PRODUCTS.some(p=>p.sku.toLowerCase()===sku.toLowerCase())){ showFieldError('pm_err','That SKU already exists'); return; }
+  clearFieldError('pm_err');
+  const p={ sku, name, brand, category,
+    cost:parseInt(document.getElementById('pm_cost').value)||0,
+    price:parseInt(document.getElementById('pm_price').value)||0,
+    reorder:parseInt(document.getElementById('pm_reorder').value)||0,
+    max:parseInt(document.getElementById('pm_max').value)||0 };
+  if(window.LIVE && typeof liveAddProduct==='function'){
+    liveAddProduct(p).then(()=>{ toast('Product added · '+sku); RENDER.products(); })
+      .catch(e=>{ showFieldError('pm_err', e.message||'Could not add product'); });
+  } else {
+    PRODUCTS.push(p); touchUpdatedSafe(); toast('Product added · '+sku); RENDER.products();
+  }
+}
+function downloadProductTemplate(){
+  downloadCSV('product_template.csv',[
+    ['SKU','Product Name','Brand','Category','Unit Cost (AED)','Unit Price (AED)','Reorder Point','Max Level'],
+    ['SKU-001','Sample Product','Brand A','Electronics','100','200','10','500'],
+  ]);
+}
+// Bulk product upload with per-row error mapping; catalog only (no stock)
+function handleProductUpload(input){
+  readFileThen(input, rows=>{
+    if(rows.length<2){ showImportError('product','The file has no data rows.',[]); return; }
+    if(!BRANDS.length){ showImportError('product','Create at least one brand first.',[]); return; }
+    const errors=[]; const staged=[];
+    for(let i=1;i<rows.length;i++){
+      const r=rows[i]; const ln=i+1;
+      const [sku,name,brand,category,costS,priceS,reorderS,maxS]=r.map(x=>String(x==null?'':x).trim());
+      if(r.length<3 || (!sku && !name)) continue;
+      const e=[];
+      if(!sku) e.push('missing SKU');
+      else if(PRODUCTS.some(p=>p.sku.toLowerCase()===sku.toLowerCase()) || staged.some(s=>s.sku.toLowerCase()===sku.toLowerCase())) e.push(`SKU "${sku}" already exists`);
+      if(!name) e.push('missing Product Name');
+      if(!brand) e.push('missing Brand');
+      else if(!BRANDS.includes(brand)) e.push(`Brand "${brand}" does not exist`);
+      if(e.length){ errors.push(`Row ${ln}: ${e.join('; ')}`); continue; }
+      staged.push({ sku, name, brand, category:category||'', cost:parseInt(costS)||0, price:parseInt(priceS)||0, reorder:parseInt(reorderS)||0, max:parseInt(maxS)||0 });
+    }
+    if(errors.length){ showImportError('product',`Import cancelled — ${errors.length} row(s) failed. Nothing was imported.`, errors); return; }
+    if(!staged.length){ showImportError('product','No valid rows found.',[]); return; }
+    const commit=()=>{
+      const run=async()=>{
+        for(const s of staged){
+          if(window.LIVE && typeof liveAddProduct==='function'){ await liveAddProduct(s); }
+          else PRODUCTS.push(s);
+        }
+        touchUpdatedSafe(); clearImportError('product');
+        toast(`Imported ${staged.length} product(s)`); RENDER.products();
+      };
+      run().catch(e=>showImportError('product', e.message||'Upload failed', []));
+    };
+    if(typeof confirmUpload==='function') confirmUpload('product', staged.length, staged.slice(0,5).map(s=>`${s.sku} · ${s.name} · ${s.brand}`), commit);
+    else commit();
+  });
+}
+
+/* ============================================================
+   PRIORITY 3 — EDIT INWARD (reverse old stock, apply new)
+   Edits the whole BOE+PO group so multi-line intakes stay consistent.
+============================================================ */
+let EDIT_LINES=[]; let _elSeq=0; let EDIT_CTX=null;
+function editInward(id){
+  const rec=INWARD.find(r=>r.id===id); if(!rec){ toast('Record not found'); return; }
+  // gather all lines that share the same BOE + PO (the intake group)
+  const group=INWARD.filter(r=>r.boe===rec.boe && r.po===rec.po);
+  EDIT_CTX={ boe:rec.boe, po:rec.po, type:rec.type, supplier:rec.supplier, date:rec.date, grn:rec.grn, ids:group.map(g=>g.id) };
+  EDIT_LINES=group.map(g=>({ lid:'E'+(++_elSeq), sku:g.sku, qty:g.qty, value:g.value, wh:g.wh }));
+  const opts=PRODUCTS.map(p=>`<option value="${esc(p.sku)}">${esc(p.sku)} — ${esc(p.name)}</option>`).join('');
+  const body=`
+    <div class="form-grid" style="grid-template-columns:1fr 1fr">
+      <div class="fg-field"><label>Entry Type</label><select id="ei_type"><option${EDIT_CTX.type==='Purchase'?' selected':''}>Purchase</option><option${EDIT_CTX.type==='Return'?' selected':''}>Return</option></select></div>
+      <div class="fg-field"><label>BOE <span class="req">*</span></label><input id="ei_boe" value="${esc(EDIT_CTX.boe)}"></div>
+      <div class="fg-field"><label>PO <span class="req">*</span></label><input id="ei_po" value="${esc(EDIT_CTX.po)}"></div>
+      <div class="fg-field"><label>Supplier</label><input id="ei_supplier" value="${esc(EDIT_CTX.supplier||'')}"></div>
+      <div class="fg-field"><label>Date</label><input id="ei_date" type="date" value="${esc(EDIT_CTX.date||'')}"></div>
+      <div class="fg-field"><label>GRN</label><input id="ei_grn" value="${esc(EDIT_CTX.grn||'')}"></div>
+    </div>
+    <h4 style="margin:12px 0 6px;font-size:13px">Product lines</h4>
+    <div class="table-scroll"><table class="line-table"><thead><tr><th style="min-width:200px">SKU</th><th class="num" style="min-width:90px">Qty</th><th class="num" style="min-width:120px">Value</th><th style="min-width:130px">Warehouse</th><th style="width:40px"></th></tr></thead><tbody id="ei_lines"></tbody></table></div>
+    <button class="btn btn-ghost" style="margin-top:8px" data-onclick="addEditLine()">+ Add Product</button>`;
+  openModal('Edit intake · '+EDIT_CTX.boe, body, saveInwardEdit, 'Save changes');
+  window.__eiOpts=opts;
+  renderEditLines();
+}
+function addEditLine(){ EDIT_LINES.push({lid:'E'+(++_elSeq),sku:(PRODUCTS[0]||{}).sku||'',qty:'',value:'',wh:WAREHOUSES[0]||''}); renderEditLines(); }
+function removeEditLine(lid){ EDIT_LINES=EDIT_LINES.filter(l=>l.lid!==lid); renderEditLines(); }
+function syncEditLine(lid,field,val){ const l=EDIT_LINES.find(x=>x.lid===lid); if(l) l[field]=val; }
+function renderEditLines(){
+  const body=document.getElementById('ei_lines'); if(!body) return;
+  const opts=window.__eiOpts||'';
+  body.innerHTML=EDIT_LINES.map(l=>`<tr>
+    <td><select data-onchange="syncEditLine('${l.lid}','sku',this.value)">${opts.replace(`value="${esc(l.sku)}"`,`value="${esc(l.sku)}" selected`)}</select></td>
+    <td class="num"><input type="number" min="1" value="${esc(String(l.qty))}" data-oninput="syncEditLine('${l.lid}','qty',this.value)"></td>
+    <td class="num"><input type="number" value="${esc(String(l.value))}" data-oninput="syncEditLine('${l.lid}','value',this.value)"></td>
+    <td><select data-onchange="syncEditLine('${l.lid}','wh',this.value)">${WAREHOUSES.map(w=>`<option${w===l.wh?' selected':''}>${esc(w)}</option>`).join('')}</select></td>
+    <td class="num"><button class="btn btn-ghost btn-del" style="padding:4px 8px" data-onclick="removeEditLine('${l.lid}')">✕</button></td>
+  </tr>`).join('');
+}
+function saveInwardEdit(){
+  const type=document.getElementById('ei_type').value;
+  const boe=(document.getElementById('ei_boe').value||'').trim();
+  const po=(document.getElementById('ei_po').value||'').trim();
+  const supplier=(document.getElementById('ei_supplier').value||'').trim();
+  const date=document.getElementById('ei_date').value||'';
+  const grn=(document.getElementById('ei_grn').value||'').trim();
+  if(!boe||!po){ showFieldError('modalErr','BOE and PO are required'); return; }
+  const valid=[]; const seen={};
+  for(const l of EDIT_LINES){
+    const q=parseInt(l.qty)||0; if(!l.sku||!q||!l.wh) continue;
+    const k=l.sku+'@'+l.wh; if(seen[k]){ showFieldError('modalErr',`Duplicate line: ${l.sku} in ${l.wh}`); return; } seen[k]=true;
+    const p=prod(l.sku);
+    valid.push({sku:l.sku,qty:q,value:parseInt(l.value)||q*((p&&p.cost)||0),wh:l.wh,brand:(p&&p.brand)||''});
+  }
+  if(!valid.length){ showFieldError('modalErr','Add at least one product line'); return; }
+  // CRITICAL LOGIC (Priority 3): remove all old group rows, insert new ones, then recompute stock.
+  // Because stock is recomputed from the ledger, the previous impact is reversed automatically —
+  // no duplicate stock addition, no mismatch.
+  if(window.LIVE && typeof liveEditInwardGroup==='function'){
+    liveEditInwardGroup(EDIT_CTX.ids, {type,boe,po,supplier,date,grn}, valid)
+      .then(()=>{ closeModal(); toast('Intake updated'); RENDER.inward(); })
+      .catch(e=>{ showFieldError('modalErr', e.message||'Could not update'); });
+    return;
+  }
+  const idset=new Set(EDIT_CTX.ids);
+  for(let i=INWARD.length-1;i>=0;i--){ if(idset.has(INWARD[i].id)) INWARD.splice(i,1); }
+  valid.forEach(v=>{ INWARD.unshift({id:nextId('IN'),type,boe,po,supplier,brand:v.brand,sku:v.sku,qty:v.qty,value:v.value,wh:v.wh,date,grn}); });
+  recomputeStock(); touchUpdatedSafe();
+  closeModal(); toast('Intake updated'); RENDER.inward();
+}
+
+/* ---------- expose for delegation ---------- */
+(function(){
+  var names=['saveProductMaster','downloadProductTemplate','handleProductUpload',
+    'editInward','addEditLine','removeEditLine','syncEditLine','saveInwardEdit'];
+  names.forEach(function(n){ try{ if(typeof eval(n)==='function') window[n]=eval(n); }catch(e){} });
+})();
+
 </script>
 <script>
 /* ============================================================
@@ -2099,7 +2375,7 @@ async function liveLoadAll(){
   const { data: prods } = await sb.from('products').select('*, brands(name)').order('sku');
   PRODUCTS.length=0; PROD_ID={};
   (prods||[]).forEach(p=>{
-    PRODUCTS.push({ sku:p.sku, name:p.name, brand:p.brands?p.brands.name:'', cost:Number(p.unit_cost)||0, price:Number(p.unit_price)||0, reorder:p.reorder_point||0, max:p.max_level||0 });
+    PRODUCTS.push({ sku:p.sku, name:p.name, brand:p.brands?p.brands.name:'', category:p.category||'', cost:Number(p.unit_cost)||0, price:Number(p.unit_price)||0, reorder:p.reorder_point||0, max:p.max_level||0 });
     PROD_ID[p.sku]=p.id;
   });
 
@@ -2212,8 +2488,31 @@ async function liveEnsureProduct(sku, name, brandName, cost){
 }
 async function liveAddProduct(p){
   const brand_id = BRAND_ID[p.brand];
-  const { error } = await sb.from('products').insert({ sku:p.sku, name:p.name, brand_id, unit_cost:p.cost, unit_price:p.price, reorder_point:p.reorder, max_level:p.max });
+  const row = { sku:p.sku, name:p.name, brand_id, unit_cost:p.cost, unit_price:p.price, reorder_point:p.reorder, max_level:p.max };
+  if(p.category!==undefined) row.category = p.category; // Priority 2A
+  const { error } = await sb.from('products').insert(row);
   if (error) throw error; await liveLoadAll();
+}
+// ADDED (Priority 2): insert multiple inward lines under one shared BOE/PO header
+async function liveAddInwardBatch(header, lines){
+  const payload=[];
+  for(const v of lines){
+    const brandName = v.brand || header.supplier;
+    const product_id = await liveEnsureProduct(v.sku, v.sku, brandName, 0);
+    payload.push({
+      type:header.type, boe_no:header.boe, po_no:header.po, brand_id:BRAND_ID[brandName],
+      supplier:header.supplier||'', product_id, qty:v.qty, unit_cost:0, value:v.value,
+      warehouse_id:WH_ID[v.wh], date:header.date, grn:header.grn, created_by:CURRENT.id
+    });
+  }
+  const { error } = await sb.from('inward').insert(payload);
+  if(error) throw error; await liveLoadAll();
+}
+// ADDED (Priority 3): edit an inward group — delete old rows, insert new; stock recomputes from ledger
+async function liveEditInwardGroup(ids, header, lines){
+  const dbIds = ids.map(id=>INWARD_ID[id]||id);
+  if(dbIds.length){ const { error:delErr } = await sb.from('inward').delete().in('id', dbIds); if(delErr) throw delErr; }
+  await liveAddInwardBatch(header, lines);
 }
 async function liveAddInward(r){
   const brandName = r.brand || r.supplier;
@@ -2263,12 +2562,18 @@ async function liveUpdateWarehouse(oldName, newName){
   if (error) throw error; await liveLoadAll();
 }
 async function liveUpdateUser(id, fields){
-  // update profile name/email; brands re-linked via user_brands
-  await sb.from('profiles').update({ name:fields.name, email:fields.email }).eq('id', id);
+  // update profile name/email
+  const { error: pErr } = await sb.from('profiles').update({ name:fields.name, email:fields.email }).eq('id', id);
+  if (pErr) throw new Error(pErr.message||'Could not update profile');
+  // FIXED: re-link brands with explicit error checks so newly assigned brands actually persist.
   if (fields.brands){
-    await sb.from('user_brands').delete().eq('user_id', id);
+    const { error: delErr } = await sb.from('user_brands').delete().eq('user_id', id);
+    if (delErr) throw new Error(delErr.message||'Could not clear old brand links');
     const links = fields.brands.map(n=>({ user_id:id, brand_id:BRAND_ID[n] })).filter(l=>l.brand_id);
-    if (links.length) await sb.from('user_brands').insert(links);
+    if (links.length){
+      const { error: insErr } = await sb.from('user_brands').insert(links);
+      if (insErr) throw new Error(insErr.message||'Could not save brand assignments');
+    }
   }
   await liveLoadAll();
 }
@@ -2276,12 +2581,16 @@ async function liveUpdateUser(id, fields){
 /* ---------- SALES CHANNELS (Feature 5) — stored in a 'channels' table ---------- */
 async function liveLoadChannels(){
   if(!LIVE) return;
-  const { data } = await sb.from('channels').select('*').order('name');
-  if (data && data.length){ CHANNELS.length=0; data.forEach(c=>CHANNELS.push(c.name)); }
+  const { data, error } = await sb.from('channels').select('*').order('name');
+  if(error){ console.error('liveLoadChannels', error); return; } // keep cache on network error only
+  // FIXED (Priority 1): always sync to DB truth, even when it returns 0 rows,
+  // so a deleted channel never reappears after refresh.
+  CHANNELS.length=0;
+  (data||[]).forEach(c=>CHANNELS.push(c.name));
 }
-async function liveAddChannel(name){ const { error } = await sb.from('channels').insert({ name }); if(error) throw error; }
-async function liveUpdateChannel(oldName, newName){ const { error } = await sb.from('channels').update({ name:newName }).eq('name', oldName); if(error) throw error; }
-async function liveRemoveChannel(name){ const { error } = await sb.from('channels').delete().eq('name', name); if(error) throw error; }
+async function liveAddChannel(name){ const { error } = await sb.from('channels').insert({ name }); if(error) throw error; await liveLoadChannels(); }
+async function liveUpdateChannel(oldName, newName){ const { error } = await sb.from('channels').update({ name:newName }).eq('name', oldName); if(error) throw error; await liveLoadChannels(); }
+async function liveRemoveChannel(name){ const { error } = await sb.from('channels').delete().eq('name', name); if(error) throw error; await liveLoadChannels(); }
 
 /* ---------- PRODUCTS edit/delete (Issue 2) ---------- */
 async function liveUpdateProduct(sku, p){
