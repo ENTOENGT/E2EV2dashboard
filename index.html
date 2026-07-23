@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>ENTOEN CLIENTS ACCESS</title>
+<title>ENTOEN PARTNER DASHBOARD</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
 <style>
 :root{
@@ -2651,6 +2651,10 @@ const SUPABASE_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFz
 
 const LIVE = (SUPABASE_URL.indexOf('YOUR-PROJECT') === -1);  // true once you paste real keys
 let sb = null;
+// FIXED (persistence): `const LIVE` at script top-level is NOT a window property, so every
+// `if (window.LIVE && ...)` check in the app layer silently evaluated to false and skipped the
+// database write (edits appeared to work, then reverted on refresh). Expose it explicitly.
+window.LIVE = LIVE;
 // FIXED (Issue 1): persist the auth session across refreshes (localStorage) and auto-refresh tokens.
 if (LIVE && window.supabase) {
   sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON, {
@@ -2663,6 +2667,7 @@ if (LIVE && window.supabase) {
     }
   });
 }
+window.sb = sb;   // FIXED (persistence): keep the client reachable from the app layer
 
 /* maps so we can translate names <-> uuids the UI never sees */
 let BRAND_ID = {};   // name -> id
