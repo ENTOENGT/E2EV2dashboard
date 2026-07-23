@@ -932,6 +932,24 @@ function renderInwardAdmin(){
     <button class="btn btn-ghost" style="margin-top:10px" data-onclick="addInwardLine()">+ Add Product</button>
     <div style="display:flex;justify-content:flex-end;margin-top:12px"><button class="btn btn-teal" data-onclick="saveInward()">Save intake</button></div>`}
   </div>
+  <!-- ADDED: bulk inward import (built natively into the page, always visible) -->
+  <div class="card" id="inwardImportCard" style="margin-bottom:16px">
+    <div class="card-head"><div><h3>Import inward (bulk upload)</h3><div class="ch-sub">Upload a CSV to add many inward lines at once</div></div></div>
+    <label class="drop-zone" for="inwardFile">
+      <svg class="dz-ic" fill="none" stroke="currentColor" stroke-width="1.7" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12"/></svg>
+      <h4>Drop your inward file here</h4>
+      <p>or <span class="link">browse</span> · .csv</p>
+    </label>
+    <input type="file" id="inwardFile" accept=".csv" style="display:none" data-onchange="handleInwardUpload(this)">
+    <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:10px">
+      <button class="btn btn-teal" data-onclick="document.getElementById('inwardFile').click()">Choose CSV file…</button>
+      <button class="btn btn-ghost" data-onclick="downloadInwardTemplate()">Download inward template</button>
+    </div>
+    <p style="font-size:12px;color:var(--ink-soft);margin-top:10px;line-height:1.5">
+      Columns: <b>Type, BOE, PO, Supplier, Brand, SKU, Product Name, Qty, Unit Cost, Value, Warehouse, Date, GRN</b>.
+      SKUs must already exist under Products. Every row is validated and you'll get a confirmation before anything is saved.
+    </p>
+  </div>
   ${importErrorBanner('inward')}
   <div class="card">
     <div class="card-head"><div><h3>Inward records</h3><div class="ch-sub">${rows.length} entries${WH_FILTER==='all'?'':' · '+esc(WH_FILTER)} — grouped by BOE › PO › SKU</div></div>
@@ -2429,35 +2447,9 @@ function listRequiredMet(key){
    The v4 refactor dropped the import UI from the intake page.
    We inject an "Import inward (CSV)" card after the intake card.
 ============================================================ */
-// ADDED: wrap the intake renderer to append an import card + records filter/export
-(function(){
-  const _origInwardAdmin = (typeof renderInwardAdmin==='function') ? renderInwardAdmin : null;
-  window.renderInwardAdmin = function(){
-    if(_origInwardAdmin) _origInwardAdmin();
-    // inject import controls once the intake DOM is present
-    const host=document.getElementById('in_err');
-    // Append an import card right after the first card if not present
-    if(!document.getElementById('inwardImportCard') && C){
-      const importCard=document.createElement('div');
-      importCard.className='card'; importCard.id='inwardImportCard';
-      importCard.style.marginBottom='16px';
-      importCard.innerHTML=`
-        <div class="card-head"><div><h3>Import inward (bulk upload)</h3><div class="ch-sub">Upload a CSV to add many inward lines at once</div></div></div>
-        <div id="in_imp_err" class="field-error" style="display:none"></div>
-        <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
-          <input type="file" id="inwardFile" accept=".csv" style="display:none" data-onchange="handleInwardUpload(this)">
-          <button class="btn btn-teal" data-onclick="document.getElementById('inwardFile').click()">Choose CSV file…</button>
-          <button class="btn btn-ghost" data-onclick="downloadInwardTemplate()">Download inward template</button>
-          <span style="font-size:12px;color:var(--ink-soft)">Columns: Type, BOE, PO, Supplier, Brand, SKU, Product Name, Qty, Unit Cost, Value, Warehouse, Date, GRN</span>
-        </div>
-        ${importErrorBanner('inward')}`;
-      // insert after the intake card (first .card in C)
-      const firstCard=C.querySelector('.card');
-      if(firstCard && firstCard.parentNode){ firstCard.parentNode.insertBefore(importCard, firstCard.nextSibling); }
-      else { C.appendChild(importCard); }
-    }
-  };
-})();
+// REMOVED: fragile DOM-injection wrapper — the import card is now built
+// directly into renderInwardAdmin's HTML above, so it always renders.
+
 
 /* ============================================================
    POINT 2 & 3 — hard guarantee CREATE/UPDATE/DELETE sync to backend
