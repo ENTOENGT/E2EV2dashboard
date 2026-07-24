@@ -561,6 +561,27 @@ function scopeTransfers(){
   return TRANSFERS.filter(t=>(isAdmin()? true : skus.has(t.sku)) && (WH_FILTER==='all'||t.from===WH_FILTER||t.to===WH_FILTER));
 }
 function stockQty(sku,wh){ const r=STOCK.find(s=>s.sku===sku&&s.wh===wh); return r?r.qty:0; }
+// FIXED (inventory valuation): stock value must use the ACTUAL cost paid on inward,
+// not the product master's cost price. Each inward row stores qty + total value, so the
+// unit cost is value/qty. We use a weighted average across all inward rows for that SKU
+// (optionally scoped to a warehouse). Falls back to the product master cost only when a
+// SKU has no inward history yet.
+function inwardUnitCost(sku, wh){
+  let q=0, v=0;
+  for(const r of INWARD){
+    if(r.sku!==sku) continue;
+    if(wh && r.wh!==wh) continue;
+    const rq=Number(r.qty)||0, rv=Number(r.value)||0;
+    if(rq>0){ q+=rq; v+=rv; }
+  }
+  if(q>0) return v/q;
+  // no inward for this warehouse — try across all warehouses
+  if(wh) return inwardUnitCost(sku, null);
+  const p=prod(sku);
+  return (p && p.cost) || 0;   // last resort: product master cost
+}
+// Value of a stock line, using the real inward cost.
+function stockLineValue(r){ return (Number(r.qty)||0) * inwardUnitCost(r.sku, r.wh); }
 function addStock(sku,wh,delta){
   let r=STOCK.find(s=>s.sku===sku&&s.wh===wh);
   if(!r){ r={sku,wh,qty:0}; STOCK.push(r); }
@@ -836,9 +857,9 @@ RENDER.dashboard=function(){
   setHead('Dashboard', (isAdmin()?'All brands':myBrandLabel())+(WH_FILTER==='all'?'':' · '+WH_FILTER));
   const stock=scopeStock(), out=scopeOutward();
   const totalUnits=stock.reduce((s,r)=>s+r.qty,0);
-  const stockValue=stock.reduce((s,r)=>s+r.qty*(prod(r.sku).cost||0),0);
+  const stockValue=stock.reduce((s,r)=>s+stockLineValue(r),0); // FIXED: inward cost
   const revenue=out.reduce((s,o)=>s+o.qty*o.price,0);
-  const cogs=out.reduce((s,o)=>s+o.qty*(prod(o.sku).cost||0),0);
+  const cogs=out.reduce((s,o)=>s+o.qty*inwardUnitCost(o.sku,o.wh),0); // FIXED: inward cost
   const commission=out.reduce((s,o)=>s+orderCommission(o),0);
   const profit=revenue-cogs-commission;
 
@@ -890,7 +911,7 @@ RENDER.dashboard=function(){
 };
 function topSkus(out){
   const m={};
-  out.forEach(o=>{const c=prod(o.sku).cost||0, comm=orderCommission(o); m[o.sku]=m[o.sku]||{sku:o.sku,qty:0,profit:0}; m[o.sku].qty+=o.qty; m[o.sku].profit+=o.qty*(o.price-c)-comm;});
+  out.forEach(o=>{const c=inwardUnitCost(o.sku,o.wh) /* FIXED: inward cost */, comm=orderCommission(o); m[o.sku]=m[o.sku]||{sku:o.sku,qty:0,profit:0}; m[o.sku].qty+=o.qty; m[o.sku].profit+=o.qty*(o.price-c)-comm;});
   return Object.values(m).sort((a,b)=>b.profit-a.profit).slice(0,6);
 }
 
@@ -995,7 +1016,7 @@ function renderInwardGroups(rows, showDelete){
               <td>${esc(r.supplier||'')}</td>
               <td>${esc(r.brand||r.supplier||'')}</td>
               <td class="num mono">${r.qty.toLocaleString('en-AE')}</td>
-              <td class="num mono">${inr(prod(r.sku).cost||0)}</td>
+              <td class="num mono">${inr(r.qty?(r.value/r.qty):0)}</td>
               <td class="num mono">${inr(r.value)}</td>
               <td>${esc(r.grn)}</td>
               ${showDelete?`<td class="num"><button class="btn btn-ghost" style="padding:5px 9px" data-onclick="editInward('${r.id}')">Edit</button> <button class="btn btn-ghost btn-del" style="padding:5px 9px" data-onclick="askDeleteInward('${r.id}')">Delete</button></td>`:''}
@@ -1212,7 +1233,7 @@ RENDER.inventory=function(){
   const stock=scopeStock();
   if(!stock.length){ C.innerHTML=emptyState('box','No stock yet','Record inward intake to build stock. Inventory shows on-hand quantity and value per SKU and warehouse.', isAdmin()?'Go to Inward':'', "go('inward')"); return; }
   const totalUnits=stock.reduce((s,r)=>s+r.qty,0);
-  const totalVal=stock.reduce((s,r)=>s+r.qty*(prod(r.sku).cost||0),0);
+  const totalVal=stock.reduce((s,r)=>s+stockLineValue(r),0); // FIXED: inward cost
   const low=stock.filter(r=>r.qty<=(prod(r.sku).reorder||0)).length;
   C.innerHTML=`
   <div class="kpi-grid">
@@ -1232,13 +1253,13 @@ RENDER.inventory=function(){
         <td class="sku-cell">${esc(r.sku)}<small>${esc(p.name||'')}</small></td>
         ${isAdmin()?`<td>${esc(p.brand||'')}</td>`:''}
         <td>${esc(r.wh)}</td><td class="num mono">${r.qty.toLocaleString('en-AE')}</td>
-        <td class="num mono">${inr(p.cost||0)}</td><td class="num mono">${inr(r.qty*(p.cost||0))}</td>
+        <td class="num mono">${inr(inwardUnitCost(r.sku,r.wh))}</td><td class="num mono">${inr(stockLineValue(r))}</td>
         <td>${stockPill(p,r.qty)}</td></tr>`;}).join('')}</tbody>
     </table></div>
   </div>`;
 };
 function filterInv(q){q=q.toLowerCase();document.querySelectorAll('#invTable tbody tr').forEach(r=>r.style.display=r.dataset.s.includes(q)?'':'none');}
-function exportInv(){ downloadCSV('inventory_export.csv',[['SKU','Product','Brand','Warehouse','Qty','Unit cost','Stock value'],...scopeStock().map(r=>{const p=prod(r.sku);return [r.sku,p.name,p.brand,r.wh,r.qty,p.cost||0,r.qty*(p.cost||0)];})]); }
+function exportInv(){ downloadCSV('inventory_export.csv',[['SKU','Product','Brand','Warehouse','Qty','Unit cost','Stock value'],...scopeStock().map(r=>{const p=prod(r.sku);return [r.sku,p.name,p.brand,r.wh,r.qty,Math.round(inwardUnitCost(r.sku,r.wh)),Math.round(stockLineValue(r))];})]); } // FIXED: inward cost
 
 /* ============================================================
    OUTWARD — with Sales + Stock Transfer tabs (admin)
@@ -1441,7 +1462,7 @@ function renderTransferTab(){
     <div class="card-head"><div><h3>Transfers</h3><div class="ch-sub">${trans.length} movements</div></div></div>
     ${trans.length?`<div class="table-scroll"><table>
       <thead><tr><th>Transfer ID</th><th>SKU</th><th class="num">Qty</th><th class="num">Value moved</th><th>From</th><th>To</th><th>Date</th><th>Status</th>${isAdmin()?'<th></th>':''}</tr></thead>
-      <tbody>${trans.map(t=>`<tr><td class="sku-cell">${esc(t.id)}</td><td>${esc(t.sku)}</td><td class="num mono">${t.qty}</td><td class="num mono">${inr(t.qty*(prod(t.sku).cost||0))}</td><td>${esc(t.from)}</td><td>${esc(t.to)}</td><td class="mono">${esc(t.date)}</td><td>${t.status==='Delivered'?'<span class="pill ok">Delivered</span>':'<span class="pill over">In transit</span>'}</td>${isAdmin()?`<td class="num"><button class="btn btn-ghost btn-del" data-onclick="askDeleteTransfer('${esc(t.id)}')">Delete</button></td>`:''}</tr>`).join('')}</tbody>
+      <tbody>${trans.map(t=>`<tr><td class="sku-cell">${esc(t.id)}</td><td>${esc(t.sku)}</td><td class="num mono">${t.qty}</td><td class="num mono">${inr(t.qty*inwardUnitCost(t.sku,t.from))}</td><td>${esc(t.from)}</td><td>${esc(t.to)}</td><td class="mono">${esc(t.date)}</td><td>${t.status==='Delivered'?'<span class="pill ok">Delivered</span>':'<span class="pill over">In transit</span>'}</td>${isAdmin()?`<td class="num"><button class="btn btn-ghost btn-del" data-onclick="askDeleteTransfer('${esc(t.id)}')">Delete</button></td>`:''}</tr>`).join('')}</tbody>
     </table></div>`:`<p style="color:var(--ink-soft);font-size:13px;padding:8px 0">No transfers yet.</p>`}
   </div>`;
 }
@@ -1528,7 +1549,7 @@ RENDER.finance=function(){
   const out=scopeOutward();
   if(!out.length){ C.innerHTML=emptyState('trending','No financial data yet','Log sales to see revenue, COGS, commission and net profit per SKU.', isAdmin()?'Go to Outward':'', "go('outward')"); return; }
   const rows={};
-  out.forEach(o=>{ const p=prod(o.sku), comm=orderCommission(o); rows[o.sku]=rows[o.sku]||{sku:o.sku,name:p.name,qty:0,rev:0,cogs:0,comm:0}; const r=rows[o.sku]; r.qty+=o.qty; r.rev+=o.qty*o.price; r.cogs+=o.qty*(p.cost||0); r.comm+=comm; });
+  out.forEach(o=>{ const p=prod(o.sku), comm=orderCommission(o); rows[o.sku]=rows[o.sku]||{sku:o.sku,name:p.name,qty:0,rev:0,cogs:0,comm:0}; const r=rows[o.sku]; r.qty+=o.qty; r.rev+=o.qty*o.price; r.cogs+=o.qty*inwardUnitCost(o.sku,o.wh); r.comm+=comm; }); // FIXED: inward cost
   const list=Object.values(rows).map(r=>({...r,net:r.rev-r.cogs-r.comm,margin:r.rev?((r.rev-r.cogs-r.comm)/r.rev*100):0}));
   const tRev=list.reduce((s,r)=>s+r.rev,0),tCogs=list.reduce((s,r)=>s+r.cogs,0),tComm=list.reduce((s,r)=>s+r.comm,0),tNet=tRev-tCogs-tComm;
   C.innerHTML=`
@@ -1563,7 +1584,7 @@ RENDER.finance=function(){
 };
 function exportFin(){
   const out=scopeOutward(),rows={};
-  out.forEach(o=>{const p=prod(o.sku),comm=orderCommission(o); rows[o.sku]=rows[o.sku]||{sku:o.sku,qty:0,rev:0,cogs:0,comm:0}; const r=rows[o.sku]; r.qty+=o.qty; r.rev+=o.qty*o.price; r.cogs+=o.qty*(p.cost||0); r.comm+=comm;});
+  out.forEach(o=>{const p=prod(o.sku),comm=orderCommission(o); rows[o.sku]=rows[o.sku]||{sku:o.sku,qty:0,rev:0,cogs:0,comm:0}; const r=rows[o.sku]; r.qty+=o.qty; r.rev+=o.qty*o.price; r.cogs+=o.qty*inwardUnitCost(o.sku,o.wh); r.comm+=comm;}); // FIXED: inward cost
   downloadCSV('pnl_by_sku.csv',[['SKU','Units','Revenue','COGS','Commission','Net Profit'],...Object.values(rows).map(r=>[r.sku,r.qty,r.rev,r.cogs,r.comm,r.rev-r.cogs-r.comm])]);
 }
 
@@ -1623,10 +1644,10 @@ function reportCard(t,d,fn){
     <button class="btn btn-ghost" data-onclick="${fn}">CSV</button></div>`;
 }
 function reportRows(type){
-  if(type==='inventory') return {title:'Inventory Snapshot',head:['SKU','Product','Brand','Warehouse','Qty','Unit cost','Stock value'],rows:scopeStock().map(r=>{const p=prod(r.sku);return [r.sku,p.name,p.brand,r.wh,r.qty,p.cost||0,r.qty*(p.cost||0)];})};
+  if(type==='inventory') return {title:'Inventory Snapshot',head:['SKU','Product','Brand','Warehouse','Qty','Unit cost','Stock value'],rows:scopeStock().map(r=>{const p=prod(r.sku);return [r.sku,p.name,p.brand,r.wh,r.qty,Math.round(inwardUnitCost(r.sku,r.wh)),Math.round(stockLineValue(r))];})}; // FIXED: inward cost
   if(type==='sales') return {title:'Sales Summary',head:['Order','Channel','SKU','Qty','Price','Value','Warehouse','Date'],rows:scopeOutward().map(o=>[o.order,o.channel,o.sku,o.qty,o.price,o.qty*o.price,o.wh,o.date])};
   if(type==='inward') return {title:'Inward Register',head:['Type','BOE','PO','Supplier','SKU','Qty','Value','Warehouse','Date','GRN'],rows:scopeInward().map(r=>[r.type,r.boe,r.po,r.supplier,r.sku,r.qty,r.value,r.wh,r.date,r.grn])};
-  if(type==='pnl'){ const out=scopeOutward(),m={}; out.forEach(o=>{const p=prod(o.sku),comm=orderCommission(o); m[o.sku]=m[o.sku]||{sku:o.sku,qty:0,rev:0,cogs:0,comm:0}; const r=m[o.sku]; r.qty+=o.qty; r.rev+=o.qty*o.price; r.cogs+=o.qty*(p.cost||0); r.comm+=comm;}); return {title:'P&L by SKU',head:['SKU','Units','Revenue','COGS','Commission','Net Profit'],rows:Object.values(m).map(r=>[r.sku,r.qty,r.rev,r.cogs,r.comm,r.rev-r.cogs-r.comm])}; }
+  if(type==='pnl'){ const out=scopeOutward(),m={}; out.forEach(o=>{const p=prod(o.sku),comm=orderCommission(o); m[o.sku]=m[o.sku]||{sku:o.sku,qty:0,rev:0,cogs:0,comm:0}; const r=m[o.sku]; r.qty+=o.qty; r.rev+=o.qty*o.price; r.cogs+=o.qty*inwardUnitCost(o.sku,o.wh); r.comm+=comm;}); /* FIXED: inward cost */ return {title:'P&L by SKU',head:['SKU','Units','Revenue','COGS','Commission','Net Profit'],rows:Object.values(m).map(r=>[r.sku,r.qty,r.rev,r.cogs,r.comm,r.rev-r.cogs-r.comm])}; }
   return {title:'Report',head:[],rows:[]};
 }
 function reportCSV(){ reportCSVFor(document.getElementById('rp_type').value); }
@@ -1811,7 +1832,7 @@ function deleteUser(id){ const i=USERS.findIndex(x=>x.id===id); if(i<0)return; c
     'inwardPick','inwardCalc','saveInward','saveProduct','exportInward','filterInv','exportInv',
     'parseCSV','readFileThen','handleInwardUpload','handleOutwardUpload',
     'deleteInward','deleteOutward','renderInwardGroups','toggleBoe','groupOutwardByWarehouse',
-    'showImportError','clearImportError','importErrorBanner','dismissImportError','nextId','nextRef','brandHasUser','ensureProduct',
+    'showImportError','clearImportError','importErrorBanner','dismissImportError','nextId','nextRef','brandHasUser','ensureProduct','inwardUnitCost','stockLineValue',
     'setOutTab','outwardPick','saveOutward','exportOut','saveTransfer','orderCommission','exportFin',
     'applySalesDateFilter','setSalesMode','setSalesMonth','setSalesFrom','setSalesTo','clearSalesFilter',
     'reportCard','reportRows','reportCSV','reportCSVFor','reportPDF','buildPDF',
@@ -2620,7 +2641,7 @@ _enhanceListPage('users', ()=>({
 }));
 _enhanceListPage('inventory', ()=>({
   key:'inventory', filename:'inventory',
-  columns:[{label:'SKU',get:r=>r.sku},{label:'Product',get:r=>prod(r.sku).name},{label:'Brand',get:r=>prod(r.sku).brand},{label:'Warehouse',get:r=>r.wh},{label:'Qty',get:r=>r.qty},{label:'Unit cost',get:r=>prod(r.sku).cost||0},{label:'Stock value',get:r=>r.qty*(prod(r.sku).cost||0)}],
+  columns:[{label:'SKU',get:r=>r.sku},{label:'Product',get:r=>prod(r.sku).name},{label:'Brand',get:r=>prod(r.sku).brand},{label:'Warehouse',get:r=>r.wh},{label:'Qty',get:r=>r.qty},{label:'Unit cost',get:r=>Math.round(inwardUnitCost(r.sku,r.wh))},{label:'Stock value',get:r=>Math.round(stockLineValue(r))}],
   getRows:()=>scopeStock(),
   filters:[{label:'Brand', key:'brand', matchColumn:'brand', options:()=>[...new Set(scopeStock().map(r=>prod(r.sku).brand).filter(Boolean))]},
            {label:'Warehouse', key:'wh', matchColumn:'warehouse', options:()=>WAREHOUSES.slice()}]
