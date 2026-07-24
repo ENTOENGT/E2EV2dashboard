@@ -1449,6 +1449,8 @@ function renderTransferTab(){
       <div class="fg-field"><label>From warehouse</label><select id="tr_from">${WAREHOUSES.map(w=>`<option>${esc(w)}</option>`).join('')}</select></div>
       <div class="fg-field"><label>To warehouse</label><select id="tr_to">${WAREHOUSES.map(w=>`<option>${esc(w)}</option>`).join('')}</select></div>
       <div class="fg-field"><label>Date</label><input id="tr_date" type="date" value="2026-07-07"></div>
+      <!-- ADDED: transfer reference for tracking -->
+      <div class="fg-field"><label>Reference</label><input id="tr_ref" placeholder="auto if blank e.g. TRF-REF-001"></div>
       <div class="fg-field" style="justify-content:flex-end"><button class="btn btn-teal" data-onclick="saveTransfer()">Create transfer</button></div>
     </div>`:`<p style="color:var(--ink-soft);font-size:13px">You need at least two warehouses and one product to transfer stock.</p>`}
     ${canT?`<div style="display:flex;gap:10px;margin-top:12px;flex-wrap:wrap">
@@ -1461,16 +1463,16 @@ function renderTransferTab(){
   <div class="card">
     <div class="card-head"><div><h3>Transfers</h3><div class="ch-sub">${trans.length} movements</div></div></div>
     ${trans.length?`<div class="table-scroll"><table>
-      <thead><tr><th>Transfer ID</th><th>SKU</th><th class="num">Qty</th><th class="num">Value moved</th><th>From</th><th>To</th><th>Date</th><th>Status</th>${isAdmin()?'<th></th>':''}</tr></thead>
-      <tbody>${trans.map(t=>`<tr><td class="sku-cell">${esc(t.id)}</td><td>${esc(t.sku)}</td><td class="num mono">${t.qty}</td><td class="num mono">${inr(t.qty*inwardUnitCost(t.sku,t.from))}</td><td>${esc(t.from)}</td><td>${esc(t.to)}</td><td class="mono">${esc(t.date)}</td><td>${t.status==='Delivered'?'<span class="pill ok">Delivered</span>':'<span class="pill over">In transit</span>'}</td>${isAdmin()?`<td class="num"><button class="btn btn-ghost btn-del" data-onclick="askDeleteTransfer('${esc(t.id)}')">Delete</button></td>`:''}</tr>`).join('')}</tbody>
+      <thead><tr><th>Transfer ID</th><th>Reference</th><th>SKU</th><th class="num">Qty</th><th class="num">Unit cost</th><th class="num">Value moved</th><th>From</th><th>To</th><th>Date</th><th>Status</th>${isAdmin()?'<th></th>':''}</tr></thead>
+      <tbody>${trans.map(t=>`<tr><td class="sku-cell">${esc(t.id)}</td><td>${esc(t.ref||'—')}</td><td>${esc(t.sku)}</td><td class="num mono">${t.qty}</td><td class="num mono">${inr(inwardUnitCost(t.sku,t.from))}</td><td class="num mono">${inr(t.qty*inwardUnitCost(t.sku,t.from))}</td><td>${esc(t.from)}</td><td>${esc(t.to)}</td><td class="mono">${esc(t.date)}</td><td>${t.status==='Delivered'?'<span class="pill ok">Delivered</span>':'<span class="pill over">In transit</span>'}</td>${isAdmin()?`<td class="num"><button class="btn btn-ghost btn-del" data-onclick="askDeleteTransfer('${esc(t.id)}')">Delete</button></td>`:''}</tr>`).join('')}</tbody>
     </table></div>`:`<p style="color:var(--ink-soft);font-size:13px;padding:8px 0">No transfers yet.</p>`}
   </div>`;
 }
 // ADDED (Issue 5): transfer CSV template
 function downloadTransferTemplate(){
   downloadCSV('transfer_template.csv',[
-    ['SKU','Quantity','From Warehouse','To Warehouse','Date (YYYY-MM-DD)'],
-    ['SKU-001','50','Warehouse 1','Warehouse 2','2026-07-07'],
+    ['SKU','Quantity','From Warehouse','To Warehouse','Date (YYYY-MM-DD)','Reference'],
+    ['SKU-001','50','Warehouse 1','Warehouse 2','2026-07-07','TRF-REF-001'],
   ]);
 }
 // ADDED (Issue 5): bulk upload for stock transfers with row validation + confirmation
@@ -1482,7 +1484,7 @@ function handleTransferUpload(input){
     const stockOf=(sku,wh)=>{ const k=sku+'@'+wh; if(running[k]===undefined) running[k]=stockQty(sku,wh); return running[k]; };
     for(let i=1;i<rows.length;i++){
       const r=rows[i]; const ln=i+1;
-      const [sku,qtyS,from,to,date]=r.map(x=>String(x==null?'':x).trim());
+      const [sku,qtyS,from,to,date,refS]=r.map(x=>String(x==null?'':x).trim()); // ADDED: reference
       if(r.length<4 || (!sku && !from && !to)) continue;
       const rowErr=[];
       if(!sku) rowErr.push('missing SKU');
@@ -1497,12 +1499,27 @@ function handleTransferUpload(input){
       if(sku && from && WAREHOUSES.includes(from) && qty && stockOf(sku,from)<qty) rowErr.push(`only ${stockOf(sku,from)} of "${sku}" available in "${from}" (need ${qty})`);
       if(rowErr.length){ errors.push(`Row ${ln}: ${rowErr.join('; ')}`); continue; }
       running[sku+'@'+from]-=qty; running[sku+'@'+to]=(running[sku+'@'+to]===undefined?stockQty(sku,to):running[sku+'@'+to])+qty;
-      staged.push({sku,qty,from,to,date:date||'2026-07-07'});
+      staged.push({sku,qty,from,to,date:date||'2026-07-07',ref:refS||nextRef('TRF-REF')});
     }
     if(errors.length){ showImportError('transfer',`Import cancelled — ${errors.length} row(s) failed validation. Nothing was imported.`, errors); return; }
     if(!staged.length){ showImportError('transfer','No valid rows found in the file.',[]); return; }
     const commit=()=>{
-      staged.forEach(s=>{ TRANSFERS.unshift({id:nextId('TRF'),sku:s.sku,qty:s.qty,from:s.from,to:s.to,date:s.date,status:'Delivered'}); });
+      // UPDATED (persistence): when live, save every transfer to the database.
+      if(window.LIVE && typeof liveAddTransfer==='function'){
+        (async()=>{
+          try{
+            for(const s of staged){ await liveAddTransfer({sku:s.sku,qty:s.qty,from:s.from,to:s.to,date:s.date,ref:s.ref}); }
+            clearImportError('transfer'); touchUpdatedSafe();
+            toast(`Imported ${staged.length} transfer(s)`); renderTransferTab();
+          }catch(e){
+            console.error('Transfer import failed:', e);
+            showImportError('transfer','Import stopped — the database rejected a row.',
+              [ (e&&e.message)?e.message:String(e), 'If this mentions permission or row-level security, run 08_transfer_sales_fix.sql in Supabase.' ]);
+          }
+        })();
+        return;
+      }
+      staged.forEach(s=>{ TRANSFERS.unshift({id:nextId('TRF'),ref:s.ref,sku:s.sku,qty:s.qty,from:s.from,to:s.to,date:s.date,status:'Delivered'}); });
       recomputeStock(); touchUpdated();
       clearImportError('transfer');
       toast(`Imported ${staged.length} transfer(s)`);
@@ -1519,7 +1536,8 @@ function saveTransfer(){
   if(!qty){ toast('Enter a quantity'); return; }
   if(from===to){ toast('Choose different warehouses'); return; }
   if(stockQty(sku,from)<qty){ toast(`Not enough stock: ${stockQty(sku,from)} in ${from}`); return; }
-  TRANSFERS.unshift({id:nextId('TRF'),sku,qty,from,to,date,status:'Delivered'});
+  const ref=((document.getElementById('tr_ref')||{}).value||'').trim()||nextRef('TRF-REF'); // ADDED: reference tracking
+  TRANSFERS.unshift({id:nextId('TRF'),ref,sku,qty,from,to,date,status:'Delivered'});
   recomputeStock();        // FIXED (Issue 4): stock follows the ledger
   touchUpdated();          // ADDED (Issue 3)
   toast(`Transferred ${qty} ${sku}: ${from} → ${to}`);
@@ -2733,7 +2751,7 @@ async function liveLoadAll(){
   const { data: trs } = await sb.from('transfers').select('*, products(sku), from:from_wh(name), to:to_wh(name)').order('created_at',{ascending:false});
   TRANSFERS.length=0;
   (trs||[]).forEach(t=>{
-    TRANSFERS.push({ id:t.id, sku:t.products?t.products.sku:'', qty:t.qty, from:t.from?t.from.name:'', to:t.to?t.to.name:'', date:t.date, status:t.status });
+    TRANSFERS.push({ id:t.id, ref:t.reference||'', sku:t.products?t.products.sku:'', qty:t.qty, from:t.from?t.from.name:'', to:t.to?t.to.name:'', date:t.date, status:t.status });
   });
 
   // stock (from the inventory view — already brand-filtered by RLS)
@@ -2867,9 +2885,9 @@ async function liveAddOutward(o){
 }
 async function liveDeleteOutward(dispId){ const id=OUTWARD_ID[dispId]||dispId; const { error } = await sb.from('outward').delete().eq('id', id); if(error) throw error; await liveLoadAll(); }
 async function liveAddTransfer(t){
-  const { error } = await sb.from('transfers').insert({
-    product_id:PROD_ID[t.sku], qty:t.qty, from_wh:WH_ID[t.from], to_wh:WH_ID[t.to], date:t.date, created_by:CURRENT.id
-  });
+  const row = { product_id:PROD_ID[t.sku], qty:t.qty, from_wh:WH_ID[t.from], to_wh:WH_ID[t.to], date:t.date, created_by:CURRENT.id };
+  if (t.ref) row.reference = t.ref;   // ADDED: reference tracking
+  const { error } = await sb.from('transfers').insert(row);
   if (error) throw error; await liveLoadAll();
 }
 async function liveCreateUser(u){
@@ -3106,7 +3124,13 @@ async function liveDeleteTransfer(id){
     try{
       await liveAddOutward({ order, channel, sku, qty, price, commission, wh, date });
       toast(`Sale logged · -${qty} ${sku} from ${wh}`); renderSalesTab();
-    }catch(e){ toast(e.message||'Could not log sale'); }
+    }catch(e){
+      // FIXED (persistence): surface the real database error rather than failing quietly.
+      console.error('Sale save failed:', e);
+      showImportError('outward','Sale NOT saved — the database rejected it. Nothing was stored.',
+        [ (e && e.message) ? e.message : String(e),
+          'If this mentions permission or row-level security, run 08_transfer_sales_fix.sql in Supabase.' ]);
+    }
   };
   window.deleteOutward = async function(id){
     try{ await liveDeleteOutward(id); toast('Sale deleted'); renderSalesTab(); }
@@ -3119,13 +3143,21 @@ async function liveDeleteTransfer(id){
     const qty=parseInt(document.getElementById('tr_qty').value)||0;
     const from=document.getElementById('tr_from').value, to=document.getElementById('tr_to').value;
     const date=document.getElementById('tr_date').value||new Date().toISOString().slice(0,10);
+    const ref=((document.getElementById('tr_ref')||{}).value||'').trim()||nextRef('TRF-REF'); // ADDED: reference
     if(!qty){ toast('Enter a quantity'); return; }
     if(from===to){ toast('Choose different warehouses'); return; }
     if(stockQty(sku,from)<qty){ toast(`Not enough stock: ${stockQty(sku,from)} in ${from}`); return; }
     try{
-      await liveAddTransfer({ sku, qty, from, to, date });
+      await liveAddTransfer({ sku, qty, from, to, date, ref });
       toast(`Transferred ${qty} ${sku}: ${from} → ${to}`); renderTransferTab();
-    }catch(e){ toast(e.message||'Could not transfer'); }
+    }catch(e){
+      // FIXED (persistence): the save was failing silently, so the row vanished on refresh.
+      // Surface the real database error instead of a soft toast.
+      console.error('Transfer save failed:', e);
+      showImportError('transfer','Transfer NOT saved — the database rejected it. Nothing was stored.',
+        [ (e && e.message) ? e.message : String(e),
+          'If this mentions permission or row-level security, run 08_transfer_sales_fix.sql in Supabase.' ]);
+    }
   };
 
   // ---------- USERS ----------
