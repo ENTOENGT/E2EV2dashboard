@@ -371,14 +371,28 @@ tbody tr:last-child td{border-bottom:none}
 .req{color:var(--bad);font-weight:700}
 .field-error{background:#fdeceb;color:#c0392b;font-size:12.5px;font-weight:600;padding:10px 12px;border-radius:9px;margin-bottom:12px;border:1px solid #f5c3bf}
 .modal-scrim{position:fixed;inset:0;background:rgba(18,36,42,.48);display:flex;align-items:center;justify-content:center;z-index:1000;padding:20px}
-.modal-card{background:var(--card);border-radius:16px;width:100%;max-width:460px;box-shadow:0 24px 60px rgba(0,0,0,.28);overflow:hidden;animation:modalIn .16s ease}
+.modal-card{background:var(--card);border-radius:16px;width:100%;max-width:460px;box-shadow:0 24px 60px rgba(0,0,0,.28);overflow:hidden;animation:modalIn .16s ease;max-height:90vh;display:flex;flex-direction:column}
 .modal-card.modal-sm{max-width:400px}
+.modal-card.modal-wide{max-width:720px}
+.modal-body .table-scroll{max-height:52vh;overflow:auto}
+/* ADDED (Issue 3): second sales filter row + reference badge */
+.sales-filter-row{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin:10px 0 4px}
+.sales-filter-row .filter-input{min-width:150px}
+.sales-filter-row input[type=text]{flex:1;min-width:200px}
+.ref-badge{display:inline-block;background:var(--teal);color:#fff;font-size:10px;font-weight:800;letter-spacing:.06em;padding:2px 7px;border-radius:6px;vertical-align:middle}
+.modal-body table{width:100%;border-collapse:collapse}
+.pm-modal-table{table-layout:auto;min-width:520px}
+.pm-modal-table th,.pm-modal-table td{padding:9px 12px;white-space:nowrap;vertical-align:middle;text-align:left}
+.pm-modal-table th.num,.pm-modal-table td.num{text-align:right}
+.pm-modal-table td:nth-child(2){white-space:normal;min-width:180px}
+.pm-modal-table tbody tr:hover{background:var(--bg)}
+.modal-body thead th{position:sticky;top:0;background:var(--card);z-index:1;box-shadow:0 1px 0 var(--line)}
 @keyframes modalIn{from{opacity:0;transform:translateY(8px) scale(.98)}to{opacity:1;transform:none}}
-.modal-head{display:flex;align-items:center;justify-content:space-between;padding:16px 20px;border-bottom:1px solid var(--line)}
+.modal-head{display:flex;align-items:center;justify-content:space-between;padding:16px 20px;border-bottom:1px solid var(--line);flex-shrink:0}
 .modal-head h3{margin:0;font-size:16px;color:var(--ink)}
 .modal-x{background:none;border:none;font-size:15px;color:var(--ink-soft);cursor:pointer;padding:4px 8px;border-radius:7px}
 .modal-x:hover{background:var(--bg);color:var(--ink)}
-.modal-body{padding:18px 20px;display:flex;flex-direction:column;gap:12px}
+.modal-body{padding:18px 20px;display:flex;flex-direction:column;gap:12px;overflow-y:auto;flex:1;min-height:0}
 .modal-body .field-error{margin:0}
 .modal-foot{display:flex;justify-content:flex-end;gap:10px;padding:14px 20px;border-top:1px solid var(--line);background:var(--bg)}
 #modalErr{margin:14px 20px 0}
@@ -519,7 +533,8 @@ function nextId(prefix){ return (prefix||'ID')+'-'+(_idSeq++).toString().padStar
 function nextRef(prefix){ return (prefix||'REF')+'-'+Math.floor(Math.random()*9000000+1000000); }
 
 /* ---------- HELPERS ---------- */
-const inr = n => 'AED ' + Math.round(n||0).toLocaleString('en-AE');
+const inr = n => 'AED ' + Number(n||0).toLocaleString('en-AE',{minimumFractionDigits:2,maximumFractionDigits:2}); // FIXED (Issue 2): always 2 decimals
+const num2 = n => Number(n||0).toLocaleString('en-AE',{minimumFractionDigits:2,maximumFractionDigits:2}); // 2-dp plain number
 const inrK = n => { n=n||0; return n>=1000000 ? 'AED '+(n/1000000).toFixed(2)+'M' : n>=1000 ? 'AED '+(n/1000).toFixed(1)+'K' : inr(n); };
 const prod = sku => PRODUCTS.find(p=>p.sku===sku) || {};
 const channelClass = c => ({Amazon:'amazon',Offline:'offline',Shopify:'shopify',Flipkart:'flipkart'}[c]||'offline');
@@ -1128,7 +1143,7 @@ function saveProduct(){
   toast('Product added · '+sku);
   RENDER.inward();
 }
-function exportInward(){ downloadCSV('inward_export.csv',[['Type','BOE','PO','Supplier','SKU','Qty','Value','Warehouse','Date','GRN'],...scopeInward().map(r=>[r.type,r.boe,r.po,r.supplier,r.sku,r.qty,r.value,r.wh,r.date,r.grn])]); }
+function exportInward(){ const d2=v=>Number(v||0).toFixed(2); downloadCSV('inward_export.csv',[['Type','BOE','PO','Supplier','SKU','Qty','Value','Warehouse','Date','GRN'],...scopeInward().map(r=>[r.type,r.boe,r.po,r.supplier,r.sku,r.qty,d2(r.value),r.wh,r.date,r.grn])]); } // FIXED (Issue 2)
 
 /* --- CSV parsing (handles quoted fields & commas) --- */
 function parseCSV(text){
@@ -1259,24 +1274,34 @@ RENDER.inventory=function(){
   </div>`;
 };
 function filterInv(q){q=q.toLowerCase();document.querySelectorAll('#invTable tbody tr').forEach(r=>r.style.display=r.dataset.s.includes(q)?'':'none');}
-function exportInv(){ downloadCSV('inventory_export.csv',[['SKU','Product','Brand','Warehouse','Qty','Unit cost','Stock value'],...scopeStock().map(r=>{const p=prod(r.sku);return [r.sku,p.name,p.brand,r.wh,r.qty,Math.round(inwardUnitCost(r.sku,r.wh)),Math.round(stockLineValue(r))];})]); } // FIXED: inward cost
+function exportInv(){ const d2=v=>Number(v||0).toFixed(2); downloadCSV('inventory_export.csv',[['SKU','Product','Brand','Warehouse','Qty','Unit cost','Stock value'],...scopeStock().map(r=>{const p=prod(r.sku);return [r.sku,p.name,p.brand,r.wh,r.qty,d2(inwardUnitCost(r.sku,r.wh)),d2(stockLineValue(r))];})]); } // FIXED: inward cost + 2dp
 
 /* ============================================================
    OUTWARD — with Sales + Stock Transfer tabs (admin)
 ============================================================ */
 let OUT_TAB='sales';
-let SALES_FILTER={mode:'all', month:'', from:'', to:''};
+let SALES_FILTER={mode:'all', month:'', from:'', to:'', wh:'', channel:'', q:'', group:'warehouse'}; // ADDED (Issue 3): wh/channel/search + group mode
 function applySalesDateFilter(list){
   const f=SALES_FILTER;
-  if(f.mode==='month' && f.month){ return list.filter(o=>o.date && o.date.slice(0,7)===f.month); }
-  if(f.mode==='custom'){ return list.filter(o=>{ if(!o.date) return false; if(f.from && o.date<f.from) return false; if(f.to && o.date>f.to) return false; return true; }); }
-  return list;
+  let out=list;
+  if(f.mode==='month' && f.month){ out=out.filter(o=>o.date && o.date.slice(0,7)===f.month); }
+  else if(f.mode==='custom'){ out=out.filter(o=>{ if(!o.date) return false; if(f.from && o.date<f.from) return false; if(f.to && o.date>f.to) return false; return true; }); }
+  // ADDED (Issue 3): warehouse + channel + text filters
+  if(f.wh) out=out.filter(o=>o.wh===f.wh);
+  if(f.channel) out=out.filter(o=>o.channel===f.channel);
+  if(f.q){ const q=f.q.toLowerCase(); out=out.filter(o=>[o.order,o.sku,o.channel,o.wh,(prod(o.sku).name||'')].some(v=>String(v||'').toLowerCase().includes(q))); }
+  return out;
 }
+// ADDED (Issue 3): filter setters
+function setSalesWh(v){ SALES_FILTER.wh=v; renderSalesTab(); }
+function setSalesChannel(v){ SALES_FILTER.channel=v; renderSalesTab(); }
+function setSalesSearch(v){ SALES_FILTER.q=v; renderSalesTab(); }
+function setSalesGroup(v){ SALES_FILTER.group=v; renderSalesTab(); }
 function setSalesMode(m){ SALES_FILTER.mode=m; renderSalesTab(); }
 function setSalesMonth(v){ SALES_FILTER.month=v; SALES_FILTER.mode='month'; renderSalesTab(); }
 function setSalesFrom(v){ SALES_FILTER.from=v; SALES_FILTER.mode='custom'; renderSalesTab(); }
 function setSalesTo(v){ SALES_FILTER.to=v; SALES_FILTER.mode='custom'; renderSalesTab(); }
-function clearSalesFilter(){ SALES_FILTER={mode:'all',month:'',from:'',to:''}; renderSalesTab(); }
+function clearSalesFilter(){ SALES_FILTER={mode:'all',month:'',from:'',to:'',wh:'',channel:'',q:'',group:SALES_FILTER.group||'warehouse'}; renderSalesTab(); }
 RENDER.outward=function(){
   setHead('Outward','Sales & stock transfers'+(WH_FILTER==='all'?'':' · '+WH_FILTER));
   C.innerHTML=`
@@ -1302,8 +1327,19 @@ function renderSalesTab(){
       </div>
       ${f.mode==='month'?`<input type="month" class="filter-input" value="${esc(f.month)}" data-onchange="setSalesMonth(this.value)">`:''}
       ${f.mode==='custom'?`<span class="filter-range"><input type="date" class="filter-input" value="${esc(f.from)}" data-onchange="setSalesFrom(this.value)"><span class="rng-to">to</span><input type="date" class="filter-input" value="${esc(f.to)}" data-onchange="setSalesTo(this.value)"></span>`:''}
-      ${f.mode!=='all'?`<button class="btn btn-ghost" style="padding:7px 12px" data-onclick="clearSalesFilter()">Clear</button>`:''}
-    </div>`;
+      ${f.mode!=='all'?`<button class="btn btn-ghost" style="padding:7px 12px" data-onclick="clearSalesFilter()">Clear dates</button>`:''}
+      </div>
+      <!-- ADDED (Issue 3): warehouse / channel / search + group toggle -->
+      <div class="sales-filter-row">
+        <input type="text" class="filter-input" placeholder="Search order, SKU, reference…" value="${esc(f.q||'')}" data-oninput="setSalesSearch(this.value)">
+        <select class="filter-input" data-onchange="setSalesWh(this.value)"><option value="">All warehouses</option>${WAREHOUSES.map(w=>`<option${f.wh===w?' selected':''}>${esc(w)}</option>`).join('')}</select>
+        <select class="filter-input" data-onchange="setSalesChannel(this.value)"><option value="">All channels</option>${CHANNELS.map(ch=>`<option${f.channel===ch?' selected':''}>${esc(ch)}</option>`).join('')}</select>
+        <div class="mini-tab">
+          <button class="${(f.group||'warehouse')==='warehouse'?'active':''}" data-onclick="setSalesGroup('warehouse')">By warehouse</button>
+          <button class="${f.group==='reference'?'active':''}" data-onclick="setSalesGroup('reference')">By reference</button>
+        </div>
+        ${(f.wh||f.channel||f.q)?`<button class="btn btn-ghost" style="padding:7px 12px" data-onclick="clearSalesFilter()">Clear</button>`:''}
+      </div>`;
   document.getElementById('outBody').innerHTML=`
   ${isAdmin()?`<div class="card" style="margin-bottom:16px">
     <div class="card-head"><div><h3>Log a sale</h3><div class="ch-sub">Manual sales entry</div></div></div>
@@ -1333,7 +1369,7 @@ function renderSalesTab(){
     <div class="card-head"><div><h3>${isAdmin()?'Sales by warehouse':'Sales'}</h3><div class="ch-sub">${out.length} of ${all.length} orders${WH_FILTER==='all'?'':' · '+esc(WH_FILTER)}</div></div>
       <div class="spacer"></div><button class="btn btn-ghost" data-onclick="exportOut()">Export</button></div>
     ${filterBar}
-    ${out.length? groupOutwardByWarehouse(out) : `<p style="color:var(--ink-soft);font-size:13px;padding:8px 0">${all.length?'No sales in the selected period.':'No sales recorded yet.'}</p>`}
+    ${out.length? ((SALES_FILTER.group==='reference')? groupOutwardByReference(out) : groupOutwardByWarehouse(out)) : `<p style="color:var(--ink-soft);font-size:13px;padding:8px 0">${all.length?'No sales match the current filters.':'No sales recorded yet.'}</p>`}
   </div>`;
 }
 function groupOutwardByWarehouse(out){
@@ -1353,6 +1389,35 @@ function groupOutwardByWarehouse(out){
           <td class="sku-cell">${esc(o.order)}</td>
           <td><span class="tag ${channelClass(o.channel)}">${esc(o.channel)}</span></td>
           <td>${esc(o.sku)}<small>${esc(prod(o.sku).name||'')}</small></td>
+          <td class="num mono">${o.qty}</td><td class="num mono">${inr(o.price)}</td><td class="num mono">${inr(v)}</td>
+          <td class="num mono">${inr(cm)}</td><td class="num mono pos">${inr(v-cm)}</td>
+          <td class="mono">${esc(o.date)}</td>
+          ${isAdmin()?`<td class="num"><button class="btn btn-ghost btn-del" data-onclick="askDeleteOutward('${o.id}')">Delete</button></td>`:''}
+        </tr>`;}).join('')}</tbody>
+      </table></div>
+    </div>`;
+  }).join('');
+}
+// ADDED (Issue 3): group sales by their reference / order number, with the reference as a header
+function groupOutwardByReference(out){
+  const groups={};
+  out.forEach(o=>{ const ref=o.order||'(no reference)'; (groups[ref]=groups[ref]||[]).push(o); });
+  return Object.keys(groups).sort().map(ref=>{
+    const g=groups[ref];
+    const val=g.reduce((s,o)=>s+o.qty*o.price,0), units=g.reduce((s,o)=>s+o.qty,0), comm=g.reduce((s,o)=>s+orderCommission(o),0);
+    const ch=g[0]?g[0].channel:'';
+    return `<div class="wh-group">
+      <div class="wh-head">
+        <div class="wh-name"><span class="ref-badge">REF</span> ${esc(ref)}${ch?` <span class="tag ${channelClass(ch)}" style="margin-left:8px">${esc(ch)}</span>`:''}</div>
+        <div class="wh-meta"><span>${g.length} line${g.length>1?'s':''}</span><span>${num2(units)} units</span><span>comm ${inr(comm)}</span><b class="mono">${inr(val)}</b></div>
+      </div>
+      <div class="table-scroll"><table class="wh-table">
+        <thead><tr><th>SKU</th><th>Product</th><th>Channel</th><th>Warehouse</th><th class="num">Qty</th><th class="num">Price</th><th class="num">Value</th><th class="num">Commission</th><th class="num">Net</th><th>Date</th>${isAdmin()?'<th></th>':''}</tr></thead>
+        <tbody>${g.map(o=>{const v=o.qty*o.price, cm=orderCommission(o); return `<tr>
+          <td class="sku-cell">${esc(o.sku)}</td>
+          <td>${esc(prod(o.sku).name||'')}</td>
+          <td><span class="tag ${channelClass(o.channel)}">${esc(o.channel)}</span></td>
+          <td>${esc(o.wh)}</td>
           <td class="num mono">${o.qty}</td><td class="num mono">${inr(o.price)}</td><td class="num mono">${inr(v)}</td>
           <td class="num mono">${inr(cm)}</td><td class="num mono pos">${inr(v-cm)}</td>
           <td class="mono">${esc(o.date)}</td>
@@ -1388,7 +1453,7 @@ function deleteOutward(id){
   toast(`Deleted sale ${esc(o.order)}`);
   renderSalesTab();
 }
-function exportOut(){ downloadCSV('sales_export.csv',[['Order','Channel','SKU','Qty','Price','Value','Commission','Net','Warehouse','Date'],...scopeOutward().map(o=>{const v=o.qty*o.price,cm=orderCommission(o);return [o.order,o.channel,o.sku,o.qty,o.price,v,cm,v-cm,o.wh,o.date];})]); }
+function exportOut(){ const d2=v=>Number(v||0).toFixed(2); downloadCSV('sales_export.csv',[['Order','Channel','SKU','Qty','Price','Value','Commission','Net','Warehouse','Date'],...scopeOutward().map(o=>{const v=o.qty*o.price,cm=orderCommission(o);return [o.order,o.channel,o.sku,o.qty,d2(o.price),d2(v),d2(cm),d2(v-cm),o.wh,o.date];})]); } // FIXED (Issue 2)
 function handleOutwardUpload(input){
   readFileThen(input, rows=>{
     if(rows.length<2){ showImportError('outward','The file has no data rows.',[]); return; }
@@ -1852,7 +1917,7 @@ function deleteUser(id){ const i=USERS.findIndex(x=>x.id===id); if(i<0)return; c
     'deleteInward','deleteOutward','renderInwardGroups','toggleBoe','groupOutwardByWarehouse',
     'showImportError','clearImportError','importErrorBanner','dismissImportError','nextId','nextRef','brandHasUser','ensureProduct','inwardUnitCost','stockLineValue',
     'setOutTab','outwardPick','saveOutward','exportOut','saveTransfer','orderCommission','exportFin',
-    'applySalesDateFilter','setSalesMode','setSalesMonth','setSalesFrom','setSalesTo','clearSalesFilter',
+    'applySalesDateFilter','setSalesMode','setSalesMonth','setSalesFrom','setSalesTo','clearSalesFilter','setSalesWh','setSalesChannel','setSalesSearch','setSalesGroup','groupOutwardByReference','num2',
     'reportCard','reportRows','reportCSV','reportCSVFor','reportPDF','buildPDF',
     'addBrand','removeBrand','addWarehouse','removeWarehouse','createUser','toggleUser','deleteUser','killCharts',
     'showFieldError','clearFieldError','isValidEmail','passwordProblems',
@@ -1885,11 +1950,11 @@ function deleteUser(id){ const i=USERS.findIndex(x=>x.id===id); if(i<0)return; c
 ============================================================ */
 
 /* ---------- generic MODAL ---------- */
-function openModal(title, bodyHtml, onSave, saveLabel){
+function openModal(title, bodyHtml, onSave, saveLabel, sizeClass){
   closeModal();
   const wrap=document.createElement('div');
   wrap.className='modal-scrim'; wrap.id='appModal';
-  wrap.innerHTML=`<div class="modal-card">
+  wrap.innerHTML=`<div class="modal-card ${sizeClass||''}">
     <div class="modal-head"><h3>${esc(title)}</h3><button class="modal-x" data-onclick="closeModal()">✕</button></div>
     <div id="modalErr" class="field-error" style="display:none"></div>
     <div class="modal-body">${bodyHtml}</div>
@@ -2151,10 +2216,10 @@ function manageBrandProducts(brand){
           + '</td></tr>';
       }).join('')
     : '<tr><td colspan="5" style="color:var(--ink-soft);font-size:13px;padding:10px">No products under this brand yet.</td></tr>';
-  var body = '<div class="table-scroll"><table>'
-    + '<thead><tr><th>SKU</th><th>Product</th><th class="num">Cost</th><th class="num">Price</th><th></th></tr></thead>'
+  var body = '<div class="table-scroll"><table class="pm-modal-table">'
+    + '<thead><tr><th>SKU</th><th>Product</th><th class="num">Cost</th><th class="num">Price</th><th class="num">Actions</th></tr></thead>'
     + '<tbody>'+rows+'</tbody></table></div>';
-  openModal('Products — '+brand, body, function(){ closeModal(); }, 'Done');
+  openModal('Products — '+brand, body, function(){ closeModal(); }, 'Done', 'modal-wide');
 }
 
 // ADDED: edit a product (validation applied)
@@ -2704,6 +2769,23 @@ window.sb = sb;   // FIXED (persistence): keep the client reachable from the app
 let BRAND_ID = {};   // name -> id
 let BRAND_NAME = {}; // id -> name
 let WH_ID = {};      // name -> id
+// FIXED (Issue 4): warehouse-id resolver. Sales in some warehouses vanished after refresh
+// because WH_ID[name] came back undefined (a subtle name mismatch — stray spaces/case),
+// so the insert sent warehouse_id = null and the DB rejected it silently. This resolves the
+// id defensively (exact → trimmed → case-insensitive) and throws a clear error if truly unknown.
+function resolveWhId(name){
+  if(name==null) throw new Error('No warehouse selected for this entry.');
+  if(WH_ID[name]!=null) return WH_ID[name];
+  const want=String(name).trim().toLowerCase();
+  for(const k in WH_ID){ if(String(k).trim().toLowerCase()===want) return WH_ID[k]; }
+  throw new Error('Warehouse "'+name+'" was not found in the database. Re-select it and try again.');
+}
+function resolveProdId(sku){
+  if(sku!=null && PROD_ID[sku]!=null) return PROD_ID[sku];
+  const want=String(sku==null?'':sku).trim().toLowerCase();
+  for(const k in PROD_ID){ if(String(k).trim().toLowerCase()===want) return PROD_ID[k]; }
+  throw new Error('Product "'+sku+'" was not found in the database.');
+}
 let PROD_ID = {};    // sku -> id
 let INWARD_ID = {};  // our display id -> db id
 let OUTWARD_ID = {}; // our display id -> db id
@@ -2852,7 +2934,7 @@ async function liveAddInwardBatch(header, lines){
     payload.push({
       type:header.type, boe_no:header.boe, po_no:header.po, brand_id:BRAND_ID[brandName],
       supplier:header.supplier||'', product_id, qty:v.qty, unit_cost:0, value:v.value,
-      warehouse_id:WH_ID[v.wh], date:header.date, grn:header.grn, created_by:CURRENT.id
+      warehouse_id:resolveWhId(v.wh), date:header.date, grn:header.grn, created_by:CURRENT.id // FIXED (Issue 4)
     });
   }
   const { error } = await sb.from('inward').insert(payload);
@@ -2869,23 +2951,24 @@ async function liveAddInward(r){
   const product_id = await liveEnsureProduct(r.sku, r.sku, brandName, r.unitCost||0);
   const { error } = await sb.from('inward').insert({
     type:r.type, boe_no:r.boe, po_no:r.po, brand_id:BRAND_ID[brandName], supplier:r.supplier||'', product_id,
-    qty:r.qty, unit_cost:r.unitCost||0, value:r.value, warehouse_id:WH_ID[r.wh], date:r.date, grn:r.grn,
+    qty:r.qty, unit_cost:r.unitCost||0, value:r.value, warehouse_id:resolveWhId(r.wh), date:r.date, grn:r.grn, // FIXED (Issue 4)
     created_by: CURRENT.id
   });
   if (error) throw error; await liveLoadAll();
 }
 async function liveDeleteInward(dispId){ const id=INWARD_ID[dispId]||dispId; const { error } = await sb.from('inward').delete().eq('id', id); if(error) throw error; await liveLoadAll(); }
 async function liveAddOutward(o){
-  const product_id = PROD_ID[o.sku];
+  const product_id = resolveProdId(o.sku);          // FIXED (Issue 4)
+  const warehouse_id = resolveWhId(o.wh);           // FIXED (Issue 4): never send null
   const { error } = await sb.from('outward').insert({
     channel:o.channel, order_ref:o.order, product_id, qty:o.qty, selling_price:o.price,
-    commission:o.commission||0, warehouse_id:WH_ID[o.wh], date:o.date, created_by:CURRENT.id
+    commission:o.commission||0, warehouse_id, date:o.date, created_by:CURRENT.id
   });
   if (error) throw error; await liveLoadAll();
 }
 async function liveDeleteOutward(dispId){ const id=OUTWARD_ID[dispId]||dispId; const { error } = await sb.from('outward').delete().eq('id', id); if(error) throw error; await liveLoadAll(); }
 async function liveAddTransfer(t){
-  const row = { product_id:PROD_ID[t.sku], qty:t.qty, from_wh:WH_ID[t.from], to_wh:WH_ID[t.to], date:t.date, created_by:CURRENT.id };
+  const row = { product_id:resolveProdId(t.sku), qty:t.qty, from_wh:resolveWhId(t.from), to_wh:resolveWhId(t.to), date:t.date, created_by:CURRENT.id }; // FIXED (Issue 4)
   if (t.ref) row.reference = t.ref;   // ADDED: reference tracking
   const { error } = await sb.from('transfers').insert(row);
   if (error) throw error; await liveLoadAll();
