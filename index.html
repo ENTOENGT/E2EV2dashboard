@@ -826,8 +826,8 @@ function downloadInwardTemplate(){
 function downloadOutwardTemplate(){
   downloadCSV('sales_template.csv',[
     ['Sales Channel','Order ID','SKU','Product Name','Quantity Sold','Selling Price (AED)','Commission (AED)','Date (YYYY-MM-DD)','Warehouse'],
-    ['Amazon','403-0000000','SKU-001','Sample Product','10','499','1497','2026-07-07','Warehouse 1'],
-    ['Noon','NO-0000000','SKU-001','Sample Product','5','499','624','2026-07-07','Warehouse 1'],
+    ['Amazon','403-0000000','SKU-001','Sample Product','10','499.99','149.70','2026-07-07','Warehouse 1'],
+    ['Noon','NO-0000000','SKU-001','Sample Product','5','499.50','62.40','2026-07-07','Warehouse 1'],
   ]);
 }
 
@@ -1281,6 +1281,20 @@ function exportInv(){ const d2=v=>Number(v||0).toFixed(2); downloadCSV('inventor
 ============================================================ */
 let OUT_TAB='sales';
 let SALES_FILTER={mode:'all', month:'', from:'', to:'', wh:'', channel:'', q:'', group:'warehouse'}; // ADDED (Issue 3): wh/channel/search + group mode
+// ADDED (Issue 3): stock-transfer filters, mirroring the sales filters
+let TRANSFER_FILTER={ q:'', from:'', to:'', group:'flat' };
+function applyTransferFilter(list){
+  const f=TRANSFER_FILTER; let out=list;
+  if(f.from) out=out.filter(t=>t.from===f.from);
+  if(f.to) out=out.filter(t=>t.to===f.to);
+  if(f.q){ const q=f.q.toLowerCase(); out=out.filter(t=>[t.id,t.ref,t.sku,t.from,t.to,(prod(t.sku).name||'')].some(v=>String(v||'').toLowerCase().includes(q))); }
+  return out;
+}
+function setTransferSearch(v){ TRANSFER_FILTER.q=v; renderTransferTab(); }
+function setTransferFrom(v){ TRANSFER_FILTER.from=v; renderTransferTab(); }
+function setTransferTo(v){ TRANSFER_FILTER.to=v; renderTransferTab(); }
+function setTransferGroup(v){ TRANSFER_FILTER.group=v; renderTransferTab(); }
+function clearTransferFilter(){ TRANSFER_FILTER={q:'',from:'',to:'',group:TRANSFER_FILTER.group||'flat'}; renderTransferTab(); }
 function applySalesDateFilter(list){
   const f=SALES_FILTER;
   let out=list;
@@ -1482,8 +1496,8 @@ function handleOutwardUpload(input){
         if(stockOf(sku,wh)<qty) rowErr.push(`only ${stockOf(sku,wh)} of "${sku}" available in "${wh}" (need ${qty})`);
       }
       if(rowErr.length){ errors.push(`Row ${ln}: ${rowErr.join('; ')}`); continue; }
-      const price=parseInt(priceS)|| (prod(sku).price||0);
-      const commission=Math.round(parseFloat(commS)||0);
+      const price=parseFloat(priceS)|| (prod(sku).price||0);   // FIXED (Issue 2): keep decimals, was parseInt
+      const commission=parseFloat(commS)||0;                     // FIXED (Issue 2): keep decimals, was Math.round
       running[sku+'@'+wh]-=qty;
       staged.push({order:order||nextRef('ORD'),channel:channel||'Offline',sku,qty,price,commission,date:date||'2026-07-07',wh,brand:prod(sku).brand||''});
     }
@@ -1491,6 +1505,25 @@ function handleOutwardUpload(input){
     if(!staged.length){ showImportError('outward','No valid rows found in the file.',[]); return; }
     // UPDATED (Issue 6): confirm before committing
     const commit=()=>{
+      // FIXED (Issue 1 persistence): when live, save every sale to the database so it survives refresh.
+      if(window.LIVE && typeof liveAddOutward==='function'){
+        (async()=>{
+          try{
+            for(const s of staged){
+              await liveAddOutward({ order:s.order, channel:s.channel, sku:s.sku, qty:s.qty, price:s.price, commission:s.commission, wh:s.wh, date:s.date });
+            }
+            clearImportError('outward'); touchUpdatedSafe();
+            toast(`Imported ${staged.length} sale(s)`); renderSalesTab();
+          }catch(e){
+            console.error('Sales import failed:', e);
+            showImportError('outward','Import stopped — the database rejected a row. Sales saved before the error remain; the rest were not.',
+              [ (e&&e.message)?e.message:String(e), 'If this mentions a warehouse or permission, check the warehouse name matches and that policies are set.' ]);
+            renderSalesTab();
+          }
+        })();
+        return;
+      }
+      // in-memory (demo) path
       staged.forEach(s=>{ OUTWARD.unshift({...s, id:nextId('OU')}); });
       recomputeStock();      // FIXED (Issue 4)
       touchUpdated();        // ADDED (Issue 3)
@@ -1504,6 +1537,8 @@ function handleOutwardUpload(input){
 
 function renderTransferTab(){
   const trans=scopeTransfers();
+  const tf=TRANSFER_FILTER;                 // ADDED (Issue 3)
+  const ftrans=applyTransferFilter(trans);  // ADDED (Issue 3): filtered transfers
   const canT=scopeProducts().length && WAREHOUSES.length>=2;
   document.getElementById('outBody').innerHTML=`
   <div class="card" style="margin-bottom:16px">
@@ -1526,12 +1561,54 @@ function renderTransferTab(){
     ${importErrorBanner('transfer')}
   </div>
   <div class="card">
-    <div class="card-head"><div><h3>Transfers</h3><div class="ch-sub">${trans.length} movements</div></div></div>
-    ${trans.length?`<div class="table-scroll"><table>
+    <div class="card-head"><div><h3>Transfers</h3><div class="ch-sub">${ftrans.length} of ${trans.length} movements</div></div>
+      <div class="spacer"></div><button class="btn btn-ghost" data-onclick="exportTransfers()">Export</button></div>
+    ${trans.length?`
+    <!-- ADDED (Issue 3): stock-transfer filters, mirroring sales -->
+    <div class="sales-filter-row">
+      <input type="text" class="filter-input" placeholder="Search ID, reference, SKU…" value="${esc(tf.q||'')}" data-oninput="setTransferSearch(this.value)">
+      <select class="filter-input" data-onchange="setTransferFrom(this.value)"><option value="">All (from)</option>${WAREHOUSES.map(w=>`<option${tf.from===w?' selected':''}>${esc(w)}</option>`).join('')}</select>
+      <select class="filter-input" data-onchange="setTransferTo(this.value)"><option value="">All (to)</option>${WAREHOUSES.map(w=>`<option${tf.to===w?' selected':''}>${esc(w)}</option>`).join('')}</select>
+      <div class="mini-tab">
+        <button class="${(tf.group||'flat')==='flat'?'active':''}" data-onclick="setTransferGroup('flat')">List</button>
+        <button class="${tf.group==='reference'?'active':''}" data-onclick="setTransferGroup('reference')">By reference</button>
+      </div>
+      ${(tf.q||tf.from||tf.to)?`<button class="btn btn-ghost" style="padding:7px 12px" data-onclick="clearTransferFilter()">Clear</button>`:''}
+    </div>
+    ${ftrans.length? ((tf.group==='reference')? groupTransfersByReference(ftrans) : `<div class="table-scroll"><table>
       <thead><tr><th>Transfer ID</th><th>Reference</th><th>SKU</th><th class="num">Qty</th><th class="num">Unit cost</th><th class="num">Value moved</th><th>From</th><th>To</th><th>Date</th><th>Status</th>${isAdmin()?'<th></th>':''}</tr></thead>
-      <tbody>${trans.map(t=>`<tr><td class="sku-cell">${esc(t.id)}</td><td>${esc(t.ref||'—')}</td><td>${esc(t.sku)}</td><td class="num mono">${t.qty}</td><td class="num mono">${inr(inwardUnitCost(t.sku,t.from))}</td><td class="num mono">${inr(t.qty*inwardUnitCost(t.sku,t.from))}</td><td>${esc(t.from)}</td><td>${esc(t.to)}</td><td class="mono">${esc(t.date)}</td><td>${t.status==='Delivered'?'<span class="pill ok">Delivered</span>':'<span class="pill over">In transit</span>'}</td>${isAdmin()?`<td class="num"><button class="btn btn-ghost btn-del" data-onclick="askDeleteTransfer('${esc(t.id)}')">Delete</button></td>`:''}</tr>`).join('')}</tbody>
-    </table></div>`:`<p style="color:var(--ink-soft);font-size:13px;padding:8px 0">No transfers yet.</p>`}
+      <tbody>${ftrans.map(t=>`<tr><td class="sku-cell">${esc(t.id)}</td><td>${esc(t.ref||'—')}</td><td>${esc(t.sku)}</td><td class="num mono">${t.qty}</td><td class="num mono">${inr(inwardUnitCost(t.sku,t.from))}</td><td class="num mono">${inr(t.qty*inwardUnitCost(t.sku,t.from))}</td><td>${esc(t.from)}</td><td>${esc(t.to)}</td><td class="mono">${esc(t.date)}</td><td>${t.status==='Delivered'?'<span class="pill ok">Delivered</span>':'<span class="pill over">In transit</span>'}</td>${isAdmin()?`<td class="num"><button class="btn btn-ghost btn-del" data-onclick="askDeleteTransfer('${esc(t.id)}')">Delete</button></td>`:''}</tr>`).join('')}</tbody>
+    </table></div>`) : `<p style="color:var(--ink-soft);font-size:13px;padding:8px 0">No transfers match the current filters.</p>`}
+    `:`<p style="color:var(--ink-soft);font-size:13px;padding:8px 0">No transfers yet.</p>`}
   </div>`;
+}
+// ADDED (Issue 3): group transfers by reference, with the reference as a header
+function groupTransfersByReference(list){
+  const groups={};
+  list.forEach(t=>{ const ref=t.ref||'(no reference)'; (groups[ref]=groups[ref]||[]).push(t); });
+  return Object.keys(groups).sort().map(ref=>{
+    const g=groups[ref];
+    const units=g.reduce((s,t)=>s+t.qty,0), val=g.reduce((s,t)=>s+t.qty*inwardUnitCost(t.sku,t.from),0);
+    return `<div class="wh-group">
+      <div class="wh-head">
+        <div class="wh-name"><span class="ref-badge">REF</span> ${esc(ref)}</div>
+        <div class="wh-meta"><span>${g.length} move${g.length>1?'s':''}</span><span>${num2(units)} units</span><b class="mono">${inr(val)}</b></div>
+      </div>
+      <div class="table-scroll"><table class="wh-table">
+        <thead><tr><th>Transfer ID</th><th>SKU</th><th class="num">Qty</th><th class="num">Unit cost</th><th class="num">Value moved</th><th>From</th><th>To</th><th>Date</th><th>Status</th>${isAdmin()?'<th></th>':''}</tr></thead>
+        <tbody>${g.map(t=>`<tr><td class="sku-cell">${esc(t.id)}</td><td>${esc(t.sku)}</td><td class="num mono">${t.qty}</td><td class="num mono">${inr(inwardUnitCost(t.sku,t.from))}</td><td class="num mono">${inr(t.qty*inwardUnitCost(t.sku,t.from))}</td><td>${esc(t.from)}</td><td>${esc(t.to)}</td><td class="mono">${esc(t.date)}</td><td>${t.status==='Delivered'?'<span class="pill ok">Delivered</span>':'<span class="pill over">In transit</span>'}</td>${isAdmin()?`<td class="num"><button class="btn btn-ghost btn-del" data-onclick="askDeleteTransfer('${esc(t.id)}')">Delete</button></td>`:''}</tr>`).join('')}</tbody>
+      </table></div>
+    </div>`;
+  }).join('');
+}
+// ADDED (Issue 3): export the currently filtered transfers
+function exportTransfers(){
+  const d2=v=>Number(v||0).toFixed(2);
+  const list=applyTransferFilter(scopeTransfers());
+  downloadCSV('transfers_export.csv',[
+    ['Transfer ID','Reference','SKU','Qty','Unit cost','Value moved','From','To','Date','Status'],
+    ...list.map(t=>[t.id,t.ref||'',t.sku,t.qty,d2(inwardUnitCost(t.sku,t.from)),d2(t.qty*inwardUnitCost(t.sku,t.from)),t.from,t.to,t.date,t.status])
+  ]);
 }
 // ADDED (Issue 5): transfer CSV template
 function downloadTransferTemplate(){
@@ -1918,6 +1995,7 @@ function deleteUser(id){ const i=USERS.findIndex(x=>x.id===id); if(i<0)return; c
     'showImportError','clearImportError','importErrorBanner','dismissImportError','nextId','nextRef','brandHasUser','ensureProduct','inwardUnitCost','stockLineValue',
     'setOutTab','outwardPick','saveOutward','exportOut','saveTransfer','orderCommission','exportFin',
     'applySalesDateFilter','setSalesMode','setSalesMonth','setSalesFrom','setSalesTo','clearSalesFilter','setSalesWh','setSalesChannel','setSalesSearch','setSalesGroup','groupOutwardByReference','num2',
+    'applyTransferFilter','setTransferSearch','setTransferFrom','setTransferTo','setTransferGroup','clearTransferFilter','groupTransfersByReference','exportTransfers', // ADDED (Issue 3)
     'reportCard','reportRows','reportCSV','reportCSVFor','reportPDF','buildPDF',
     'addBrand','removeBrand','addWarehouse','removeWarehouse','createUser','toggleUser','deleteUser','killCharts',
     'showFieldError','clearFieldError','isValidEmail','passwordProblems',
@@ -3196,11 +3274,11 @@ async function liveDeleteTransfer(id){
     const sku=document.getElementById('ou_sku').value; if(!sku){ toast('Add a product first'); return; }
     const p=prod(sku);
     const qty=parseInt(document.getElementById('ou_qty').value)||0;
-    const price=parseInt(document.getElementById('ou_price').value)||p.price||0;
+    const price=parseFloat(document.getElementById('ou_price').value)||p.price||0;   // FIXED (Issue 2): keep decimals
     const channel=document.getElementById('ou_channel').value;
     const wh=document.getElementById('ou_wh').value;
     const order=document.getElementById('ou_order').value.trim()||((channel==='Amazon'?'403-':'ORD-')+Math.floor(Math.random()*9000000+1000000));
-    const commission=Math.round(parseFloat(document.getElementById('ou_comm').value)||0);
+    const commission=parseFloat(document.getElementById('ou_comm').value)||0;         // FIXED (Issue 2): keep decimals
     if(!qty){ toast('Enter a quantity'); return; }
     if(stockQty(sku,wh)<qty){ toast(`Not enough stock: ${stockQty(sku,wh)} of ${sku} in ${wh}`); return; }
     const date=new Date().toISOString().slice(0,10);
