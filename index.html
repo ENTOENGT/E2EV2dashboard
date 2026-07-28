@@ -196,6 +196,17 @@ tbody tr:last-child td{border-bottom:none}
 .pill.low{background:#fdeceb;color:var(--bad)}
 .pill.over{background:#fdf3e3;color:var(--warn)}
 .pos{color:var(--good);font-weight:650}
+/* ===== Issue 5: searchable dropdown (combobox) ===== */
+.ss-wrap{position:relative;width:100%}
+.ss-input{width:100%;box-sizing:border-box;padding:9px 30px 9px 11px;border:1px solid var(--line);border-radius:9px;font-size:13.5px;background:#fff url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%235B6F76' stroke-width='2'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E") no-repeat right 10px center}
+.ss-input:focus{outline:none;border-color:var(--teal);box-shadow:0 0 0 3px rgba(53,140,157,.12)}
+.ss-menu{position:absolute;z-index:60;left:0;right:0;top:calc(100% + 4px);background:#fff;border:1px solid var(--line);border-radius:10px;box-shadow:0 12px 30px rgba(18,36,42,.14);max-height:240px;overflow:auto;display:none}
+.ss-menu.open{display:block}
+.ss-opt{padding:9px 12px;font-size:13.5px;cursor:pointer;border-bottom:1px solid #f2f5f6;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ss-opt:last-child{border-bottom:none}
+.ss-opt:hover,.ss-opt.active{background:rgba(53,140,157,.10)}
+.ss-opt.none{color:var(--ink-soft);cursor:default}
+.ss-opt mark{background:rgba(246,134,22,.25);color:inherit;border-radius:2px}
 /* FEATURE 7: user (partner) logo shown beside the ENTOEN logo */
 .user-brand-slot{display:inline-flex;align-items:center;gap:8px;margin-left:10px;padding-left:10px;border-left:1px solid var(--line)}
 .user-brand-slot img{max-height:26px;max-width:96px;object-fit:contain;border-radius:4px}
@@ -718,28 +729,75 @@ function startIdleWatch(){
   _resetIdleTimer();
 }
 function stopIdleWatch(){ clearTimeout(_idleTimer); }
-// Multi-session: a simple cross-tab/session marker in localStorage.
-function sessionKey(u){ return 'entoen_active_'+(u.email||u.id||'').toLowerCase(); }
-function markSessionActive(u){
-  try{ localStorage.setItem(sessionKey(u), JSON.stringify({t:Date.now(), id:Math.random().toString(36).slice(2)})); }catch(e){}
+// ===== Multi-session detection via localStorage heartbeat (Issue 2) =====
+// Each open session gets a unique id and writes a heartbeat every few seconds.
+// A peer counts as "live" only if its heartbeat is recent (not just present),
+// which is what lets a second window reliably detect the first one.
+const SESSION_HEARTBEAT_MS = 4000;      // write our heartbeat this often
+const SESSION_STALE_MS      = 12000;    // a peer is considered gone after this silence
+let _mySessionId = null;
+let _sessionHbTimer = null;
+let _storageHandlerBound = false;
+function sessionKey(u){ return 'entoen_active_'+((u&&(u.email||u.id))||'').toLowerCase(); }
+function _readSession(u){
+  try{ const raw=localStorage.getItem(sessionKey(u)); return raw?JSON.parse(raw):null; }catch(e){ return null; }
 }
+// Is another *live* session (different id, recent heartbeat) holding this user?
 function isSessionActiveElsewhere(u){
-  try{
-    const raw=localStorage.getItem(sessionKey(u)); if(!raw) return false;
-    const s=JSON.parse(raw);
-    // treat as active only if marked within the idle window (stale markers are ignored)
-    return s && (Date.now()-s.t) < IDLE_LIMIT_MS;
-  }catch(e){ return false; }
+  const s=_readSession(u);
+  if(!s) return false;
+  if(_mySessionId && s.id===_mySessionId) return false;       // that's us
+  return (Date.now()-(s.t||0)) < SESSION_STALE_MS;            // recent → truly live
 }
-function clearSessionActive(u){ try{ localStorage.removeItem(sessionKey(u)); }catch(e){} }
-// Wrap login to warn if the same user is already active elsewhere.
+function markSessionActive(u){
+  _mySessionId = _mySessionId || (Date.now().toString(36)+Math.random().toString(36).slice(2));
+  try{ localStorage.setItem(sessionKey(u), JSON.stringify({t:Date.now(), id:_mySessionId})); }catch(e){}
+  // start the heartbeat so peers can see we're still here, and so we notice a takeover
+  clearInterval(_sessionHbTimer);
+  _sessionHbTimer=setInterval(()=>{
+    if(!CURRENT){ clearInterval(_sessionHbTimer); return; }
+    const cur=_readSession(CURRENT);
+    if(cur && cur.id && cur.id!==_mySessionId){
+      // Another window took over this account → this session must step down.
+      clearInterval(_sessionHbTimer);
+      toast('Signed out — this account was opened in another window.');
+      logout();
+      return;
+    }
+    try{ localStorage.setItem(sessionKey(CURRENT), JSON.stringify({t:Date.now(), id:_mySessionId})); }catch(e){}
+  }, SESSION_HEARTBEAT_MS);
+  // react instantly to a takeover from another tab (storage events fire cross-tab)
+  if(!_storageHandlerBound){
+    _storageHandlerBound=true;
+    window.addEventListener('storage', (ev)=>{
+      if(!CURRENT) return;
+      if(ev.key!==sessionKey(CURRENT)) return;
+      try{
+        const s=ev.newValue?JSON.parse(ev.newValue):null;
+        if(s && s.id && s.id!==_mySessionId){
+          clearInterval(_sessionHbTimer);
+          toast('Signed out — this account was opened in another window.');
+          logout();
+        }
+      }catch(e){}
+    });
+  }
+}
+function clearSessionActive(u){
+  clearInterval(_sessionHbTimer);
+  // only clear the marker if it's ours (don't wipe a peer that took over)
+  const s=_readSession(u);
+  if(!s || !_mySessionId || s.id===_mySessionId){ try{ localStorage.removeItem(sessionKey(u)); }catch(e){} }
+}
+// Warn if the same user is already active in another live session.
 function proceedLoginWithSessionCheck(user, enter){
   if(isSessionActiveElsewhere(user)){
     confirmAction('User is already active. Do you want to continue?', ()=>{
-      // Yes: take over — invalidate the old session marker, start fresh
-      clearSessionActive(user); markSessionActive(user); enter();
+      // Yes: take over — write OUR id, which signals the other window to step down.
+      _mySessionId = Date.now().toString(36)+Math.random().toString(36).slice(2);
+      markSessionActive(user); enter();
     });
-    return; // No: confirmAction simply closes and keeps current state
+    return; // No: keep the current session, cancel this login
   }
   markSessionActive(user); enter();
 }
@@ -1453,14 +1511,14 @@ function renderSalesTab(){
     <div class="card-head"><div><h3>Log a sale</h3><div class="ch-sub">Manual sales entry</div></div></div>
     ${canLog?`<div class="form-grid">
       <div class="fg-field"><label>Transaction Type</label><select id="ou_type" data-onchange="outwardTypeChange()"><option value="sale">Sale</option><option value="return">Sales Return</option></select></div>
-      <div class="fg-field"><label>Sales Channel</label><select id="ou_channel">${CHANNELS.map(ch=>`<option>${esc(ch)}</option>`).join('')}</select></div>
+      <div class="fg-field"><label>Sales Channel</label><select id="ou_channel" data-searchable data-ph="Search channel…">${CHANNELS.map(ch=>`<option>${esc(ch)}</option>`).join('')}</select></div>
       <div class="fg-field"><label id="ou_order_lbl">Order ID</label><input id="ou_order" placeholder="403-0000000"></div>
       <div class="fg-field" id="ou_origwrap" style="display:none"><label>Original Sale Reference</label><input id="ou_origref" placeholder="link to original sale (optional)"></div>
-      <div class="fg-field"><label>SKU</label><select id="ou_sku" data-onchange="outwardPick()">${scopeProducts().map(p=>`<option value="${esc(p.sku)}">${esc(p.sku)} — ${esc(p.name)}</option>`).join('')}</select></div>
+      <div class="fg-field"><label>SKU</label><select id="ou_sku" data-onchange="outwardPick()" data-searchable data-ph="Search SKU…">${scopeProducts().map(p=>`<option value="${esc(p.sku)}">${esc(p.sku)} — ${esc(p.name)}</option>`).join('')}</select></div>
       <div class="fg-field"><label id="ou_qty_lbl">Quantity Sold</label><input id="ou_qty" type="number" min="1" placeholder="10"></div>
       <div class="fg-field"><label>Selling Price (AED)</label><input id="ou_price" type="number" step="0.01" placeholder="0"></div>
       <div class="fg-field"><label>Platform Commission (AED)</label><input id="ou_comm" type="number" step="0.01" placeholder="0"></div>
-      <div class="fg-field"><label>Warehouse</label><select id="ou_wh">${WAREHOUSES.map(w=>`<option>${esc(w)}</option>`).join('')}</select></div>
+      <div class="fg-field"><label>Warehouse</label><select id="ou_wh" data-searchable data-ph="Search warehouse…">${WAREHOUSES.map(w=>`<option>${esc(w)}</option>`).join('')}</select></div>
       <div class="fg-field" style="justify-content:flex-end"><button class="btn btn-orange" id="ou_savebtn" data-onclick="saveOutward()">Log sale</button></div>
     </div>`:`<p style="color:var(--ink-soft);font-size:13px">Add a product and warehouse first.</p>`}
     <div class="upload-sep">Bulk upload sales (CSV)</div>
@@ -1667,10 +1725,10 @@ function renderTransferTab(){
   <div class="card" style="margin-bottom:16px">
     <div class="card-head"><div><h3>New stock transfer</h3><div class="ch-sub">Move stock between warehouses</div></div></div>
     ${canT?`<div class="form-grid">
-      <div class="fg-field"><label>SKU</label><select id="tr_sku">${scopeProducts().map(p=>`<option value="${esc(p.sku)}">${esc(p.sku)} — ${esc(p.name)}</option>`).join('')}</select></div>
+      <div class="fg-field"><label>SKU</label><select id="tr_sku" data-searchable data-ph="Search SKU…">${scopeProducts().map(p=>`<option value="${esc(p.sku)}">${esc(p.sku)} — ${esc(p.name)}</option>`).join('')}</select></div>
       <div class="fg-field"><label>Quantity</label><input id="tr_qty" type="number" min="1" placeholder="50"></div>
-      <div class="fg-field"><label>From warehouse</label><select id="tr_from">${WAREHOUSES.map(w=>`<option>${esc(w)}</option>`).join('')}</select></div>
-      <div class="fg-field"><label>To warehouse</label><select id="tr_to">${WAREHOUSES.map(w=>`<option>${esc(w)}</option>`).join('')}</select></div>
+      <div class="fg-field"><label>From warehouse</label><select id="tr_from" data-searchable data-ph="Search warehouse…">${WAREHOUSES.map(w=>`<option>${esc(w)}</option>`).join('')}</select></div>
+      <div class="fg-field"><label>To warehouse</label><select id="tr_to" data-searchable data-ph="Search warehouse…">${WAREHOUSES.map(w=>`<option>${esc(w)}</option>`).join('')}</select></div>
       <div class="fg-field"><label>Date</label><input id="tr_date" type="date" value="2026-07-07"></div>
       <!-- ADDED: transfer reference for tracking -->
       <div class="fg-field"><label>Reference</label><input id="tr_ref" placeholder="auto if blank e.g. TRF-REF-001"></div>
@@ -1929,7 +1987,7 @@ RENDER.reports=function(){
     <div class="card-head"><div><h3>Build a report</h3><div class="ch-sub">Pick a report and format</div></div></div>
     <div class="form-grid">
       <div class="fg-field"><label>Report</label><select id="rp_type"><option value="inventory">Inventory snapshot</option><option value="sales">Sales summary</option><option value="inward">Inward register (BOE / PO)</option><option value="pnl">P&L by Month</option></select></div>
-      <div class="fg-field"><label>Warehouse</label><select id="rp_wh"><option value="all">All</option>${WAREHOUSES.map(w=>`<option>${esc(w)}</option>`).join('')}</select></div>
+      <div class="fg-field"><label>Warehouse</label><select id="rp_wh" data-searchable data-ph="Search warehouse…"><option value="all">All</option>${WAREHOUSES.map(w=>`<option>${esc(w)}</option>`).join('')}</select></div>
     </div>
     <div style="display:flex;gap:10px;flex-wrap:wrap">
       <button class="btn btn-teal" data-onclick="reportCSV()">Export Excel / CSV</button>
@@ -2132,6 +2190,25 @@ function pickUserLogo(input){
   };
   r.readAsDataURL(f);
 }
+// FIXED (Issue 4): logo picker for the EDIT user modal
+let _pendingEditLogo='';
+function pickEditUserLogo(input){
+  const f=input && input.files && input.files[0]; if(!f) return;
+  if(!/^image\//.test(f.type)){ toast('Please choose an image file'); return; }
+  if(f.size > 512*1024){ toast('Logo too large — please use an image under 512 KB'); input.value=''; return; }
+  const r=new FileReader();
+  r.onload=function(e){ _pendingEditLogo=e.target.result;
+    const pv=document.getElementById('edit_ulogo_preview'); if(pv){ pv.src=_pendingEditLogo; pv.style.display='inline-block'; }
+    const rm=document.getElementById('edit_ulogo_rm'); if(rm){ rm.style.display='inline-flex'; }
+  };
+  r.readAsDataURL(f);
+}
+function removeEditUserLogo(){
+  _pendingEditLogo='';
+  const pv=document.getElementById('edit_ulogo_preview'); if(pv){ pv.src=''; pv.style.display='none'; }
+  const rm=document.getElementById('edit_ulogo_rm'); if(rm){ rm.style.display='none'; }
+  const inp=document.getElementById('edit_ulogo'); if(inp){ inp.value=''; }
+}
 function createUser(){
   const name=(document.getElementById('u_name').value||'').trim();
   const email=(document.getElementById('u_email').value||'').trim();
@@ -2164,7 +2241,7 @@ function deleteUser(id){ const i=USERS.findIndex(x=>x.id===id); if(i<0)return; c
     'setOutTab','outwardPick','saveOutward','exportOut','saveTransfer','orderCommission','exportFin',
     'applySalesDateFilter','setSalesMode','setSalesMonth','setSalesFrom','setSalesTo','clearSalesFilter','setSalesWh','setSalesChannel','setSalesSearch','setSalesGroup','setSalesTxn','outwardTypeChange','groupOutwardByReference','num2',
     'applyTransferFilter','setTransferSearch','setTransferFrom','setTransferTo','setTransferGroup','clearTransferFilter','groupTransfersByReference','exportTransfers', // ADDED (Issue 3)
-    'pickUserLogo','renderUserBrand','clearUserBrand','outRevenue','outUnits','outCommission','isReturn','outTypeLabel', // FEATURE 1/7
+    'pickUserLogo','pickEditUserLogo','removeEditUserLogo','renderUserBrand','clearUserBrand','outRevenue','outUnits','outCommission','isReturn','outTypeLabel', // FEATURE 1/7 + Issue 4
     'reportCard','reportRows','reportCSV','reportCSVFor','reportPDF','buildPDF',
     'addBrand','removeBrand','addWarehouse','removeWarehouse','createUser','toggleUser','deleteUser','killCharts',
     'showFieldError','clearFieldError','isValidEmail','passwordProblems',
@@ -2185,6 +2262,89 @@ function deleteUser(id){ const i=USERS.findIndex(x=>x.id===id); if(i<0)return; c
   document.addEventListener('click',function(e){ var el=e.target; while(el&&el!==document){ if(el.hasAttribute&&el.hasAttribute('data-onclick')){ runAttr(el,'data-onclick'); return; } el=el.parentNode; } },true);
   document.addEventListener('change',function(e){ if(e.target&&e.target.getAttribute&&e.target.getAttribute('data-onchange')) runAttr(e.target,'data-onchange'); },true);
   document.addEventListener('input',function(e){ if(e.target&&e.target.getAttribute&&e.target.getAttribute('data-oninput')) runAttr(e.target,'data-oninput'); },true);
+
+  /* ===== Issue 5: searchable dropdowns =====================================
+     Any <select data-searchable> is upgraded into a filterable combobox.
+     The original <select> is kept (hidden) so existing code that reads
+     document.getElementById(id).value and fires change events keeps working. */
+  function fuzzyRank(text, q){
+    text=(text||'').toLowerCase(); q=(q||'').toLowerCase().trim();
+    if(!q) return 0;
+    const idx=text.indexOf(q);
+    if(idx===0) return 3;            // prefix match — best
+    if(idx>0) return 2;             // substring match
+    // subsequence (nearest) match: all query chars appear in order
+    let i=0; for(const ch of text){ if(ch===q[i]) i++; if(i===q.length) break; }
+    return i===q.length ? 1 : -1;
+  }
+  function highlight(text,q){
+    q=(q||'').trim(); if(!q) return esc(text);
+    const t=text, low=t.toLowerCase(), i=low.indexOf(q.toLowerCase());
+    if(i<0) return esc(t);
+    return esc(t.slice(0,i))+'<mark>'+esc(t.slice(i,i+q.length))+'</mark>'+esc(t.slice(i+q.length));
+  }
+  function enhanceSelect(sel){
+    if(!sel || sel.__ssDone) return;
+    sel.__ssDone=true;
+    const opts=Array.from(sel.options).map(o=>({value:o.value, label:o.textContent}));
+    const wrap=document.createElement('div'); wrap.className='ss-wrap';
+    const input=document.createElement('input'); input.className='ss-input'; input.type='text';
+    input.setAttribute('autocomplete','off'); input.setAttribute('spellcheck','false');
+    const menu=document.createElement('div'); menu.className='ss-menu';
+    // hide native select but keep it in the DOM for value/change semantics
+    sel.style.display='none';
+    sel.parentNode.insertBefore(wrap, sel);
+    wrap.appendChild(input); wrap.appendChild(sel); wrap.appendChild(menu);
+    const cur=()=> opts.find(o=>o.value===sel.value) || opts[0] || {label:''};
+    input.value = cur().label || '';
+    input.placeholder = sel.getAttribute('data-ph') || 'Search…';
+    let activeIdx=-1, filtered=opts.slice();
+    function render(q){
+      filtered = opts.map(o=>({o,r:fuzzyRank(o.label,q)}))
+                     .filter(x=> q? x.r>0 : true)
+                     .sort((a,b)=> b.r-a.r)
+                     .map(x=>x.o);
+      if(!filtered.length){ menu.innerHTML='<div class="ss-opt none">No matches</div>'; return; }
+      menu.innerHTML=filtered.map((o,i)=>`<div class="ss-opt${i===activeIdx?' active':''}" data-val="${esc(o.value)}">${highlight(o.label,q)}</div>`).join('');
+    }
+    function openMenu(){ render(''); activeIdx=-1; menu.classList.add('open'); }
+    function closeMenu(){ menu.classList.remove('open'); }
+    function choose(o){
+      if(!o) return;
+      sel.value=o.value; input.value=o.label;
+      // fire native change so existing data-onchange / listeners run
+      const ev=document.createEvent('HTMLEvents'); ev.initEvent('change',true,false); sel.dispatchEvent(ev);
+      closeMenu();
+    }
+    input.addEventListener('focus',()=>{ input.select(); openMenu(); });
+    input.addEventListener('input',()=>{ activeIdx=-1; render(input.value); menu.classList.add('open'); });
+    input.addEventListener('keydown',(e)=>{
+      if(e.key==='ArrowDown'){ e.preventDefault(); activeIdx=Math.min(activeIdx+1,filtered.length-1); render(input.value); }
+      else if(e.key==='ArrowUp'){ e.preventDefault(); activeIdx=Math.max(activeIdx-1,0); render(input.value); }
+      else if(e.key==='Enter'){ e.preventDefault(); if(activeIdx>=0&&filtered[activeIdx]) choose(filtered[activeIdx]); else if(filtered.length===1) choose(filtered[0]); }
+      else if(e.key==='Escape'){ closeMenu(); input.value=cur().label; }
+    });
+    menu.addEventListener('mousedown',(e)=>{
+      const t=e.target.closest('.ss-opt'); if(!t||t.classList.contains('none')) return;
+      e.preventDefault();
+      const o=opts.find(x=>x.value===t.getAttribute('data-val')); choose(o);
+    });
+    input.addEventListener('blur',()=>{ setTimeout(()=>{ closeMenu(); // revert text if it doesn't match the selection
+      const c=cur(); if(input.value!==c.label) input.value=c.label||''; }, 120); });
+  }
+  function enhanceAll(root){
+    (root||document).querySelectorAll('select[data-searchable]').forEach(enhanceSelect);
+  }
+  // upgrade after every render: watch the main content area for new selects
+  function startSelectObserver(){
+    try{
+      const mo=new MutationObserver((muts)=>{ for(const m of muts){ if(m.addedNodes&&m.addedNodes.length){ enhanceAll(document); break; } } });
+      mo.observe(document.body,{childList:true,subtree:true});
+    }catch(e){}
+    enhanceAll(document);
+  }
+  if(document.readyState==='loading'){ document.addEventListener('DOMContentLoaded', startSelectObserver); }
+  else { startSelectObserver(); }
 })();
 
 /* ============================================================
@@ -2283,17 +2443,27 @@ function editBrand(oldName){
       if(!v){ showFieldError('modalErr','Brand name is required'); return; }
       if(v!==oldName && BRANDS.includes(v)){ showFieldError('modalErr','That brand already exists'); return; }
       if(v===oldName){ closeModal(); return; }
-      confirmProceed(CASCADE_MSG, ()=>{ updateBrand(oldName, v); toast('Brand updated'); RENDER.brands(); }); // FEATURE 6
+      confirmProceed(CASCADE_MSG, ()=>{                       // FEATURE 6 + Issue 3
+        Promise.resolve(updateBrand(oldName, v))
+          .then(()=>{ toast('Brand updated'); RENDER.brands(); })
+          .catch(e=>{ toast(e.message||'Could not update brand — changes not saved'); });
+      });
     }, 'Save changes');
 }
-function updateBrand(oldName, newName){
-  const i=BRANDS.indexOf(oldName); if(i<0) return;
-  BRANDS[i]=newName;
-  // keep related records consistent
+function _cascadeBrandLocal(oldName,newName){
+  const i=BRANDS.indexOf(oldName); if(i>=0) BRANDS[i]=newName;
   PRODUCTS.forEach(p=>{ if(p.brand===oldName) p.brand=newName; });
   INWARD.forEach(r=>{ if(r.brand===oldName) r.brand=newName; });
   USERS.forEach(u=>{ if(u.brands) u.brands=u.brands.map(b=>b===oldName?newName:b); });
-  if(window.LIVE && typeof liveUpdateBrand==='function'){ liveUpdateBrand(oldName,newName); }
+}
+// FIXED (Issue 3): persist the rename to the DB and only apply locally on success.
+// Returns a promise so the caller can surface errors instead of silently reverting on refresh.
+function updateBrand(oldName, newName){
+  if(window.LIVE && typeof liveUpdateBrand==='function'){
+    return liveUpdateBrand(oldName,newName).then(()=>{ _cascadeBrandLocal(oldName,newName); });
+  }
+  _cascadeBrandLocal(oldName,newName);
+  return Promise.resolve();
 }
 
 /* ============================================================
@@ -2307,17 +2477,27 @@ function editWarehouse(oldName){
       if(!v){ showFieldError('modalErr','Warehouse name is required'); return; }
       if(v!==oldName && WAREHOUSES.includes(v)){ showFieldError('modalErr','That warehouse already exists'); return; }
       if(v===oldName){ closeModal(); return; }
-      confirmProceed(CASCADE_MSG, ()=>{ updateWarehouse(oldName, v); toast('Warehouse updated'); buildWhFilter(); RENDER.warehouses(); }); // FEATURE 6
+      confirmProceed(CASCADE_MSG, ()=>{                       // FEATURE 6 + Issue 3
+        Promise.resolve(updateWarehouse(oldName, v))
+          .then(()=>{ toast('Warehouse updated'); buildWhFilter(); RENDER.warehouses(); })
+          .catch(e=>{ toast(e.message||'Could not update warehouse — changes not saved'); });
+      });
     }, 'Save changes');
 }
-function updateWarehouse(oldName, newName){
-  const i=WAREHOUSES.indexOf(oldName); if(i<0) return;
-  WAREHOUSES[i]=newName;
+function _cascadeWarehouseLocal(oldName,newName){
+  const i=WAREHOUSES.indexOf(oldName); if(i>=0) WAREHOUSES[i]=newName;
   STOCK.forEach(s=>{ if(s.wh===oldName) s.wh=newName; });
   INWARD.forEach(r=>{ if(r.wh===oldName) r.wh=newName; });
   OUTWARD.forEach(o=>{ if(o.wh===oldName) o.wh=newName; });
   TRANSFERS.forEach(t=>{ if(t.from===oldName) t.from=newName; if(t.to===oldName) t.to=newName; });
-  if(window.LIVE && typeof liveUpdateWarehouse==='function'){ liveUpdateWarehouse(oldName,newName); }
+}
+// FIXED (Issue 3): persist warehouse rename to DB; apply locally only on success.
+function updateWarehouse(oldName, newName){
+  if(window.LIVE && typeof liveUpdateWarehouse==='function'){
+    return liveUpdateWarehouse(oldName,newName).then(()=>{ _cascadeWarehouseLocal(oldName,newName); });
+  }
+  _cascadeWarehouseLocal(oldName,newName);
+  return Promise.resolve();
 }
 
 /* ============================================================
@@ -2326,10 +2506,21 @@ function updateWarehouse(oldName, newName){
 function editUser(id){
   const u=USERS.find(x=>x.id===id); if(!u) return;
   const checks=BRANDS.map(b=>`<label class="brand-check"><input type="checkbox" class="edit_ubrand" value="${esc(b)}" ${(u.brands||[]).includes(b)?'checked':''}> ${esc(b)}</label>`).join('')||'<span style="color:var(--ink-soft);font-size:12.5px">Create a brand first</span>';
+  // FIXED (Issue 4): the edit form now supports uploading / changing / removing the partner logo.
+  _pendingEditLogo = (u.logo||'');   // start from the current logo; picker overwrites this
+  const hasLogo = !!(u.logo);
   openModal('Edit user',
     `<div class="fg-field"><label>Full name / Company <span class="req">*</span></label><input id="edit_uname" value="${esc(u.name)}"></div>
      <div class="fg-field"><label>Login email <span class="req">*</span></label><input id="edit_uemail" type="email" value="${esc(u.email)}"></div>
-     <div class="fg-field"><label>Assign brands <span class="req">*</span></label><div class="brand-check-grid">${checks}</div></div>`,
+     <div class="fg-field"><label>Assign brands <span class="req">*</span></label><div class="brand-check-grid">${checks}</div></div>
+     <div class="fg-field"><label>Partner logo (optional)</label>
+       <input type="file" id="edit_ulogo" accept="image/*" style="display:none" data-onchange="pickEditUserLogo(this)">
+       <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+         <button type="button" class="btn btn-ghost" data-onclick="document.getElementById('edit_ulogo').click()">${hasLogo?'Change logo…':'Upload logo…'}</button>
+         <img id="edit_ulogo_preview" src="${hasLogo?u.logo:''}" style="${hasLogo?'':'display:none;'}max-height:34px;max-width:90px;object-fit:contain;border-radius:4px;border:1px solid var(--line)">
+         <button type="button" class="btn btn-ghost btn-del" id="edit_ulogo_rm" style="${hasLogo?'':'display:none;'}padding:6px 10px" data-onclick="removeEditUserLogo()">Remove</button>
+       </div>
+     </div>`,
     ()=>{
       const name=(document.getElementById('edit_uname').value||'').trim();
       const email=(document.getElementById('edit_uemail').value||'').trim();
@@ -2338,15 +2529,16 @@ function editUser(id){
       if(!isValidEmail(email)){ showFieldError('modalErr','Please enter a valid email address'); return; }
       if(!brands.length){ showFieldError('modalErr','Select at least one brand'); return; }
       if(USERS.some(x=>x.id!==id && x.email.toLowerCase()===email.toLowerCase())){ showFieldError('modalErr','That email is already used by another account'); return; }
-      // FIXED: persist to DB first and confirm via response BEFORE updating the UI,
-      // so newly assigned brands stay after refresh (no silent fire-and-forget).
+      const logo=_pendingEditLogo||'';
       if(window.LIVE && typeof liveUpdateUser==='function'){
-        liveUpdateUser(id,{name,email,brands})
-          .then(()=>{ closeModal(); toast('User updated'); RENDER.users(); })
+        liveUpdateUser(id,{name,email,brands,logo})
+          .then(()=>{ closeModal(); toast('User updated'); RENDER.users();
+                      if(CURRENT && CURRENT.id===id){ CURRENT.logo=logo; renderUserBrand(CURRENT); } }) // live-refresh own logo
           .catch(e=>{ showFieldError('modalErr', e.message||'Could not update user (changes not saved)'); });
       } else {
-        u.name=name; u.email=email; u.brands=brands;
+        u.name=name; u.email=email; u.brands=brands; u.logo=logo;
         touchUpdatedSafe(); closeModal(); toast('User updated'); RENDER.users();
+        if(CURRENT && CURRENT.id===id){ CURRENT.logo=logo; renderUserBrand(CURRENT); }
       }
     }, 'Save changes');
 }
@@ -2507,12 +2699,17 @@ function editProduct(sku){
       var nReorder=parseInt(document.getElementById('ep_reorder').value)||0;
       var nMax=parseInt(document.getElementById('ep_max').value)||0;
       // FEATURE 6: confirm before applying — product edits affect valuation/alerts across existing data.
-      confirmProceed(CASCADE_MSG, function(){
+      confirmProceed(CASCADE_MSG, function(){                 // FEATURE 6 + Issue 3
         p.name=name; p.cost=nCost; p.price=nPrice; p.reorder=nReorder; p.max=nMax;
         recomputeStock(); touchUpdated();
-        if(window.LIVE && typeof liveUpdateProduct==='function'){ liveUpdateProduct(sku,p); }
-        toast('Product updated · '+sku);
-        if(typeof RENDER!=='undefined' && RENDER.brands) RENDER.brands();
+        if(window.LIVE && typeof liveUpdateProduct==='function'){
+          Promise.resolve(liveUpdateProduct(sku,p))
+            .then(()=>{ toast('Product updated · '+sku); if(RENDER&&RENDER.brands) RENDER.brands(); })
+            .catch(e=>{ toast(e.message||'Could not update product — changes not saved'); });
+        } else {
+          toast('Product updated · '+sku);
+          if(typeof RENDER!=='undefined' && RENDER.brands) RENDER.brands();
+        }
       });
     }, 'Save changes');
 }
@@ -2566,7 +2763,7 @@ RENDER.products=function(){
       <div class="form-grid" style="grid-template-columns:1fr">
         <div class="fg-field"><label>SKU code <span class="req">*</span></label><input id="pm_sku" placeholder="SKU-001"></div>
         <div class="fg-field"><label>Product name <span class="req">*</span></label><input id="pm_name" placeholder="Product name"></div>
-        <div class="fg-field"><label>Brand <span class="req">*</span></label><select id="pm_brand">${BRANDS.map(b=>`<option>${esc(b)}</option>`).join('')||'<option value="">Create a brand first</option>'}</select></div>
+        <div class="fg-field"><label>Brand <span class="req">*</span></label><select id="pm_brand" data-searchable data-ph="Search brand…">${BRANDS.map(b=>`<option>${esc(b)}</option>`).join('')||'<option value="">Create a brand first</option>'}</select></div>
         <div class="fg-field"><label>Category</label><input id="pm_cat" placeholder="e.g. Electronics"></div>
         <div class="form-grid" style="grid-template-columns:1fr 1fr;margin:0">
           <div class="fg-field"><label>Unit cost (AED)</label><input id="pm_cost" type="number" placeholder="0"></div>
@@ -2874,7 +3071,7 @@ async function syncAndRerender(renderKey){
         <div class="form-grid" style="grid-template-columns:1fr">
           <div class="fg-field"><label>SKU code <span class="req">*</span></label><input id="pm_sku" placeholder="SKU-001"></div>
           <div class="fg-field"><label>Product name <span class="req">*</span></label><input id="pm_name" placeholder="Product name"></div>
-          <div class="fg-field"><label>Brand <span class="req">*</span></label><select id="pm_brand">${BRANDS.map(b=>`<option>${esc(b)}</option>`).join('')||'<option value="">Create a brand first</option>'}</select></div>
+          <div class="fg-field"><label>Brand <span class="req">*</span></label><select id="pm_brand" data-searchable data-ph="Search brand…">${BRANDS.map(b=>`<option>${esc(b)}</option>`).join('')||'<option value="">Create a brand first</option>'}</select></div>
           <div class="fg-field"><label>Category</label><input id="pm_cat" placeholder="e.g. Electronics"></div>
           <div class="form-grid" style="grid-template-columns:1fr 1fr;margin:0">
             <div class="fg-field"><label>Unit cost (AED)</label><input id="pm_cost" type="number" placeholder="0"></div>
@@ -3135,7 +3332,8 @@ async function liveLogin(email, password){
   CURRENT = {
     id: profile.id, name: profile.name, email: profile.email,
     role: profile.role==='admin' ? 'admin' : 'brand',
-    brands: [], active: profile.active, mustReset: profile.must_reset_password
+    brands: [], active: profile.active, mustReset: profile.must_reset_password,
+    logo: profile.logo_url || ''   // FIXED (Issue 4): carry the partner logo into the session
   };
   ROLE = CURRENT.role;
   // load brand map first so we can resolve this user's brand names
@@ -3163,7 +3361,8 @@ async function liveRestoreSession(){
   CURRENT = {
     id: profile.id, name: profile.name, email: profile.email,
     role: profile.role==='admin' ? 'admin' : 'brand',
-    brands: [], active: profile.active, mustReset: profile.must_reset_password
+    brands: [], active: profile.active, mustReset: profile.must_reset_password,
+    logo: profile.logo_url || ''   // FIXED (Issue 4)
   };
   ROLE = CURRENT.role;
   const { data: brands } = await sb.from('brands').select('*');
@@ -3269,8 +3468,10 @@ async function liveUpdateWarehouse(oldName, newName){
   if (error) throw error; await liveLoadAll();
 }
 async function liveUpdateUser(id, fields){
-  // update profile name/email
-  const { error: pErr } = await sb.from('profiles').update({ name:fields.name, email:fields.email }).eq('id', id);
+  // update profile name/email (+ logo when provided) — FIXED (Issue 4)
+  const patch={ name:fields.name, email:fields.email };
+  if(fields.logo!==undefined) patch.logo_url = fields.logo || null;
+  const { error: pErr } = await sb.from('profiles').update(patch).eq('id', id);
   if (pErr) throw new Error(pErr.message||'Could not update profile');
   // FIXED: re-link brands with explicit error checks so newly assigned brands actually persist.
   if (fields.brands){
